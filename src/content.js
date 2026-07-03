@@ -1,0 +1,1687 @@
+/* ==================================================================
+ * YouTube Channel Blocker & Cleaner — content script
+ *
+ * Runs on every YouTube page. Responsibilities:
+ *   - Remove Shorts (sidebar, tabs, shelves, /shorts redirect)   [setting]
+ *   - Hide already-watched videos past a threshold               [setting]
+ *   - Hide individually-blocked video IDs
+ *   - Hide every tile from a blocked channel
+ *   - Strip ad / promo / nudge clutter so the grid reflows
+ *   - Handle right-click menu actions relayed from the background
+ *   - Best-effort click YouTube's native "Don't recommend channel"
+ *
+ * State lives in browser.storage.local under the key "data" and is
+ * shared with the popup and options pages. Changes there flow back
+ * here via storage.onChanged.
+ * ================================================================== */
+(function () {
+    'use strict';
+
+    const api = (typeof browser !== 'undefined') ? browser : chrome;
+    const STORAGE_KEY = 'data';
+    const LEGACY_HIDDEN_KEY = 'ytShortsBlocker_manuallyHiddenIds';
+
+    // When the extension updates in place, Firefox orphans the old content
+    // script: its DOM listeners keep firing but its storage/API access is
+    // dead. Every marker we leave on DOM nodes is therefore tagged with this
+    // per-load id so a fresh instance re-wires instead of trusting stale
+    // flags, and a takeover event tells older instances to stand down.
+    const INSTANCE_ID = Math.random().toString(36).slice(2);
+    const TAKEOVER_EVENT = 'ytb-instance-takeover';
+    let retired = false;
+
+    const DEFAULT_SETTINGS = {
+        enabled: true,               // master switch for the whole extension
+        blockShorts: true,
+        hideWatched: true,
+        watchedThreshold: 75,
+        // Per-surface scope for watched-hiding. Playlists default OFF because
+        // seeing progress in Watch Later / playlists is usually the point.
+        watchedHome: true,
+        watchedSubs: true,
+        watchedSearch: true,
+        watchedRelated: true,
+        watchedChannel: true,
+        watchedPlaylists: false,
+        blackoutBlockedChannels: true,
+        revealHidden: false,         // audit mode: show hidden tiles dimmed instead of removed
+        maxQuality: true,
+        hideSidebarSpinner: true,
+        reduceFlashing: true,
+        hideEndScreen: true,
+        hidePromos: true,            // ads / promos / nudges (previously always on)
+        hideMixes: false,
+        hidePlaylists: false,
+        hideNewsShelves: false,
+        syncBlockLists: false,       // handled by the background script
+        volumeBoost: 1,        // 1 = 100% (native, no Web Audio graph)
+        wheelVolume: true      // scroll over the player to change volume/boost
+    };
+
+    /* ---- live state ------------------------------------------------ */
+    let state = {
+        hiddenVideoIds: [],
+        blockedChannels: [],
+        blockedKeywords: [],
+        settings: Object.assign({}, DEFAULT_SETTINGS)
+    };
+    let settings = Object.assign({}, DEFAULT_SETTINGS);
+    let hiddenSet = new Set();
+    let keywordMatchers = [];   // compiled from state.blockedKeywords
+    let blockedIndex = { handles: new Set(), ids: new Set(), names: new Set() };
+    let configVersion = 0;
+    let lastSerialized = '';          // guard against echoing our own writes
+    let lastContextTarget = null;     // element under the last right-click
+    let menuOwnerTile = null;         // tile whose 3-dot menu button was last pressed
+    let menuOwnerIsMain = false;      // menu opened from the main watch video, not a tile
+    let blackoutActive = false;       // current page is a blocked channel/video
+    let lastQualityVideoId = null;    // video we've already forced to max quality
+    let lastPointerDown = 0;          // timestamp of last pointerdown (menu-open hint)
+
+    /* ------------------------------------------------------------------
+     * Selectors (shared by removal passes)
+     * ------------------------------------------------------------------ */
+    const INNER_CONTAINERS = [
+        'ytd-rich-item-renderer',
+        'ytd-video-renderer',
+        'ytd-grid-video-renderer',
+        'ytd-compact-video-renderer',
+        'ytd-playlist-video-renderer',
+        'ytd-reel-item-renderer',
+        'ytd-rich-grid-media',
+        'yt-lockup-view-model',
+        'ytm-shorts-lockup-view-model',
+        'ytm-shorts-lockup-view-model-v2'
+    ].join(',');
+
+    const OUTER_GRID_CELLS = [
+        'ytd-rich-item-renderer',
+        'ytd-video-renderer',
+        'ytd-grid-video-renderer',
+        'ytd-compact-video-renderer',
+        'ytd-playlist-video-renderer'
+    ].join(',');
+
+    const PROGRESS_SELECTORS = [
+        'ytd-thumbnail-overlay-resume-playback-renderer #progress',
+        '#progress[style*="width"]',
+        '.ytThumbnailOverlayProgressBarHostWatchedProgressBarSegment',
+        'yt-thumbnail-overlay-progress-bar-view-model div[style*="width"]'
+    ].join(',');
+
+    const WATCHED_BAR_CONTAINERS = [
+        '.ytThumbnailOverlayProgressBarHostWatchedProgressBar',
+        '.ytThumbnailOverlayProgressBarHostWatchedProgressBarLegacy'
+    ].join(',');
+
+    const NON_VIDEO_CARDS = [
+        'ytd-feed-nudge-renderer',
+        'ytd-emergency-onebox-renderer',
+        'ytd-ad-slot-renderer',
+        'ytd-promoted-video-renderer',
+        'ytd-display-ad-renderer',
+        'ytd-statement-banner-renderer',
+        'ytd-banner-promo-renderer',
+        'ytd-feed-tutorial-renderer',
+        'ytd-clarification-renderer'
+    ].join(',');
+
+    const SHORTS_CSS = `
+        ytd-guide-entry-renderer:has(a[title="Shorts"]),
+        ytd-mini-guide-entry-renderer:has(a[title="Shorts"]),
+        ytd-guide-entry-renderer a[title="Shorts"],
+        ytd-mini-guide-entry-renderer a[title="Shorts"],
+        yt-tab-shape[tab-title="Shorts"],
+        tp-yt-paper-tab[aria-label="Shorts"],
+        tp-yt-paper-tab:has(> .tab-content[title="Shorts"]) {
+            display: none !important;
+        }
+    `;
+
+    // Anti-flash: keep tiles that carry a watched-progress overlay hidden until
+    // we've decided to keep them, so already-watched uploads never paint before
+    // being removed. Reveal happens by setting data-ytb-keep on survivors.
+    const ANTIFLASH_CELLS = [
+        'ytd-rich-item-renderer',
+        'ytd-video-renderer',
+        'ytd-grid-video-renderer',
+        'ytd-compact-video-renderer',
+        'ytd-playlist-video-renderer',
+        'yt-lockup-view-model'
+    ];
+    const ANTIFLASH_WATCHED = [
+        'ytd-thumbnail-overlay-resume-playback-renderer',
+        '.ytThumbnailOverlayProgressBarHostWatchedProgressBar',
+        '.ytThumbnailOverlayProgressBarHostWatchedProgressBarLegacy'
+    ];
+    const ANTIFLASH_SELECTOR = ANTIFLASH_CELLS
+        .flatMap(cell => ANTIFLASH_WATCHED.map(w => `${cell}:has(${w}):not([data-ytb-keep])`))
+        .join(',');
+    const ANTIFLASH_CSS = ANTIFLASH_SELECTOR + ' { display: none !important; }';
+    // JS-side equivalents: querying the (few) watched overlays and walking up
+    // with closest() is far cheaper than evaluating the :has() selector above
+    // via querySelectorAll on every pass.
+    const ANTIFLASH_WATCHED_SEL = ANTIFLASH_WATCHED.join(',');
+    const ANTIFLASH_CELLS_SEL = ANTIFLASH_CELLS.join(',');
+
+    // Hide the related-sidebar infinite-scroll spinner. visibility:hidden keeps
+    // the element's box so it still triggers loading of more recommendations.
+    const SPINNER_CSS = `
+        ytd-watch-next-secondary-results-renderer tp-yt-paper-spinner,
+        ytd-watch-next-secondary-results-renderer tp-yt-paper-spinner-lite,
+        ytd-watch-next-secondary-results-renderer yt-spinner,
+        ytd-watch-next-secondary-results-renderer .yt-spinner-view-model,
+        #secondary ytd-continuation-item-renderer tp-yt-paper-spinner,
+        #secondary ytd-continuation-item-renderer tp-yt-paper-spinner-lite,
+        #secondary ytd-continuation-item-renderer yt-spinner,
+        #secondary ytd-continuation-item-renderer .yt-spinner-view-model {
+            visibility: hidden !important;
+        }
+    `;
+
+    // Remove the in-player suggested-video embeds: the end-screen "video wall"
+    // shown when a video finishes (classic .html5-endscreen and the newer
+    // .ytp-fullscreen-grid / .ytp-modern-videowall-still layout), plus the
+    // pause-screen suggestions.
+    const ENDSCREEN_CSS = `
+        .html5-endscreen,
+        .ytp-endscreen-content,
+        .ytp-fullscreen-grid,
+        .ytp-videowall-still,
+        .ytp-modern-videowall-still,
+        .ytp-pause-overlay,
+        .ytp-pause-overlay-container {
+            display: none !important;
+        }
+    `;
+
+    /* ==================================================================
+     * 0. State load / save / derive
+     * ================================================================== */
+    function normalize(d) {
+        d = d || {};
+        return {
+            hiddenVideoIds: Array.isArray(d.hiddenVideoIds) ? [...new Set(d.hiddenVideoIds)] : [],
+            blockedChannels: Array.isArray(d.blockedChannels)
+                ? d.blockedChannels.filter(c => c && (c.handle || c.channelId || c.name))
+                : [],
+            blockedKeywords: Array.isArray(d.blockedKeywords)
+                ? [...new Set(d.blockedKeywords.filter(k => typeof k === 'string' && k.trim()).map(k => k.trim()))]
+                : [],
+            settings: Object.assign({}, DEFAULT_SETTINGS, d.settings || {})
+        };
+    }
+
+    // Keywords are plain case-insensitive substrings, or /pattern/flags for
+    // regex power users. A bad regex falls back to substring matching.
+    function compileKeywords() {
+        keywordMatchers = [];
+        for (const k of state.blockedKeywords) {
+            const m = k.match(/^\/(.+)\/([a-z]*)$/i);
+            if (m) {
+                try {
+                    const re = new RegExp(m[1], m[2].includes('i') ? m[2] : m[2] + 'i');
+                    keywordMatchers.push(t => re.test(t));
+                    continue;
+                } catch (e) { /* fall through to substring */ }
+            }
+            const needle = k.toLowerCase();
+            keywordMatchers.push(t => t.includes(needle));
+        }
+    }
+
+    function rebuildDerived() {
+        hiddenSet = new Set(state.hiddenVideoIds);
+        blockedIndex = { handles: new Set(), ids: new Set(), names: new Set() };
+        for (const c of state.blockedChannels) {
+            if (c.handle) blockedIndex.handles.add(c.handle.toLowerCase());
+            if (c.channelId) blockedIndex.ids.add(c.channelId);
+            if (c.name) blockedIndex.names.add(c.name.toLowerCase().trim());
+        }
+        settings = Object.assign({}, DEFAULT_SETTINGS, state.settings);
+        compileKeywords();
+        const on = settings.enabled;
+        applyShortsCss(on && settings.blockShorts);
+        applySpinnerCss(on && settings.hideSidebarSpinner);
+        // Reveal mode needs the anti-flash CSS off, or audited tiles stay invisible.
+        applyAntiflashCss(on && settings.reduceFlashing && settings.hideWatched && !settings.revealHidden);
+        applyEndScreenCss(on && settings.hideEndScreen);
+        if (on && settings.revealHidden) document.documentElement.dataset.ytbReveal = '1';
+        else delete document.documentElement.dataset.ytbReveal;
+        configVersion++;
+    }
+
+    async function persist() {
+        state = normalize(state);
+        rebuildDerived();
+        runAll();
+        try {
+            lastSerialized = JSON.stringify(state);
+            await api.storage.local.set({ [STORAGE_KEY]: state });
+        } catch (e) {
+            console.warn('[YT Blocker] Could not persist:', e);
+        }
+    }
+
+    // Persist without re-running the full pass (used by enrichment inside runAll).
+    async function saveOnly() {
+        try {
+            lastSerialized = JSON.stringify(state);
+            await api.storage.local.set({ [STORAGE_KEY]: state });
+        } catch (e) { /* ignore */ }
+    }
+
+    function migrateLegacyLocalStorage() {
+        try {
+            const raw = window.localStorage.getItem(LEGACY_HIDDEN_KEY);
+            if (!raw) return false;
+            const arr = JSON.parse(raw);
+            if (!Array.isArray(arr) || !arr.length) return false;
+            const before = hiddenSet.size;
+            state.hiddenVideoIds = [...new Set([...state.hiddenVideoIds, ...arr])];
+            rebuildDerived();
+            return hiddenSet.size > before;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /* ==================================================================
+     * 1. Shorts CSS toggle
+     * ================================================================== */
+    function applyShortsCss(on) {
+        let s = document.getElementById('ytb-shorts-style');
+        if (on) {
+            if (!s) {
+                s = document.createElement('style');
+                s.id = 'ytb-shorts-style';
+                (document.head || document.documentElement).appendChild(s);
+            }
+            s.textContent = SHORTS_CSS;
+        } else if (s) {
+            s.remove();
+        }
+    }
+
+    function applySpinnerCss(on) {
+        let s = document.getElementById('ytb-spinner-style');
+        if (on) {
+            if (!s) {
+                s = document.createElement('style');
+                s.id = 'ytb-spinner-style';
+                (document.head || document.documentElement).appendChild(s);
+            }
+            s.textContent = SPINNER_CSS;
+        } else if (s) {
+            s.remove();
+        }
+    }
+
+    function applyAntiflashCss(on) {
+        let s = document.getElementById('ytb-antiflash-style');
+        if (on) {
+            if (!s) {
+                s = document.createElement('style');
+                s.id = 'ytb-antiflash-style';
+                (document.head || document.documentElement).appendChild(s);
+            }
+            s.textContent = ANTIFLASH_CSS;
+        } else if (s) {
+            s.remove();
+        }
+    }
+
+    function applyEndScreenCss(on) {
+        let s = document.getElementById('ytb-endscreen-style');
+        if (on) {
+            if (!s) {
+                s = document.createElement('style');
+                s.id = 'ytb-endscreen-style';
+                (document.head || document.documentElement).appendChild(s);
+            }
+            s.textContent = ENDSCREEN_CSS;
+        } else if (s) {
+            s.remove();
+        }
+    }
+
+    // Reveal watched tiles that survived the threshold removal (i.e. below the
+    // threshold), so the anti-flash CSS stops hiding them. Scans the watched
+    // overlays (few) instead of evaluating the :has() selector (expensive).
+    function revealRemainingWatched() {
+        document.querySelectorAll(ANTIFLASH_WATCHED_SEL).forEach(overlay => {
+            // Mark every ancestor cell, not just the innermost: tiles nest
+            // (yt-lockup-view-model inside ytd-rich-item-renderer) and the
+            // anti-flash CSS hides each matching level independently.
+            let cell = overlay.closest(ANTIFLASH_CELLS_SEL);
+            while (cell) {
+                if (!cell.dataset.ytbKeep) cell.dataset.ytbKeep = '1';
+                cell = cell.parentElement && cell.parentElement.closest(ANTIFLASH_CELLS_SEL);
+            }
+        });
+    }
+
+    /* ==================================================================
+     * 2. Redirect /shorts/<id> -> /watch?v=<id>
+     * ================================================================== */
+    function redirectShortsUrl() {
+        if (!settings.enabled || !settings.blockShorts) return;
+        if (location.pathname.startsWith('/shorts/')) {
+            const id = location.pathname.split('/')[2];
+            // Keep the current host so m.youtube.com stays on the mobile site.
+            if (id) location.replace(location.origin + '/watch?v=' + id);
+        }
+    }
+
+    /* ==================================================================
+     * 3. Tile helpers
+     * ================================================================== */
+    function removeTile(tile) {
+        let target = tile.closest(INNER_CONTAINERS) || tile;
+        const outer = target.closest(OUTER_GRID_CELLS);
+        if (outer) target = outer;
+        if (target.classList.contains('ytb-removed')) return target;
+        // Hide in place instead of removing — see .ytb-removed in content.css.
+        target.classList.add('ytb-removed');
+        target.dataset.ytbKeep = '1';   // also exempt from the anti-flash :has() pass
+        return target;
+    }
+
+    // Un-hide everything we've hidden and drop the per-tile check cache, so
+    // the next pass re-evaluates from scratch. Used by undo + master switch.
+    function unhideAll() {
+        document.querySelectorAll('.ytb-removed').forEach(el => {
+            el.classList.remove('ytb-removed');
+            delete el.dataset.ytbChk;
+        });
+    }
+
+    function removeContainingTile(node) {
+        const target = node.closest(INNER_CONTAINERS);
+        if (target) removeTile(target);
+    }
+
+    function getVideoIdFromNode(node) {
+        if (!node) return null;
+        const a = node.querySelector('a[href*="/watch?v="]');
+        if (!a) return null;
+        const href = a.getAttribute('href') || a.href || '';
+        const m = href.match(/[?&]v=([^&]+)/);
+        return m ? m[1] : null;
+    }
+
+    function videoIdFromHref(href) {
+        const m = (href || '').match(/[?&]v=([^&]+)/) || (href || '').match(/youtu\.be\/([^?&/]+)/);
+        return m ? m[1] : null;
+    }
+
+    function findTileFromTarget(target) {
+        if (!target || !target.closest) return null;
+        return target.closest(OUTER_GRID_CELLS) ||
+               target.closest(INNER_CONTAINERS) ||
+               null;
+    }
+
+    // Merge channel identifiers found across every channel-ish anchor in a tile.
+    function getChannelInfoFromNode(node) {
+        if (!node) return null;
+        let handle = '', channelId = '', name = '';
+        const anchors = node.querySelectorAll('a[href]');
+        for (const a of anchors) {
+            const href = a.getAttribute('href') || '';
+            if (!href || href.includes('/watch') || href.includes('/shorts/') || href.includes('list=')) continue;
+            const idM = href.match(/\/channel\/(UC[\w-]+)/);
+            const handleM = href.match(/\/@([\w.\-]+)/);
+            const legacy = /^\/(c|user)\//.test(href);
+            if (!idM && !handleM && !legacy) continue;
+            if (idM && !channelId) channelId = idM[1];
+            if (handleM && !handle) handle = handleM[1];
+            const t = (a.textContent || '').trim();
+            if (t && !name) name = t;
+        }
+        // Newer lockup tiles render the channel name as plain text (no link),
+        // so fall back to reading it from the byline element.
+        if (!name) name = getChannelNameFromTile(node);
+        if (!handle && !channelId && !name) return null;
+        return { handle, channelId, name };
+    }
+
+    function cleanText(s) {
+        return (s || '').replace(/\s+/g, ' ').trim();
+    }
+
+    // Looks like a view-count / date / metadata line rather than a channel name.
+    // Covers English plus the most common YouTube UI languages, and a generic
+    // "mostly digits/punctuation" check (durations, counts) for the rest.
+    const STATS_WORDS = new RegExp([
+        // en
+        '\\bviews?\\b', 'watching', '\\bago\\b', 'streamed', 'premier', 'subscribers?',
+        // de / nl
+        'aufrufe', 'abonnenten', 'vor \\d', 'weergaven', 'geleden', 'abonnees',
+        // fr
+        '\\bvues\\b', 'il y a', 'abonnés',
+        // es / pt / it
+        'visualizaciones', '\\bvistas\\b', 'hace \\d', 'suscriptores',
+        'visualizações', 'há \\d', 'inscritos',
+        'visualizzazioni', 'iscritti',
+        // pl / ru / tr
+        'wyświetl', '\\btemu\\b', 'subskryb',
+        'просмотр', 'назад', 'подписчик',
+        'görüntüleme', 'önce', '\\babone\\b',
+        // ja / ko / zh
+        '回視聴', '再生', '時間前', '日前', '週間前', 'か月前', '年前',
+        '万 ?回', '視聴回数',
+        '조회수', '구독자', '전\\b',
+        '观看', '觀看', '订阅', '訂閱',
+        // ar
+        'مشاهدة', 'مشترك',
+        // separators
+        '•'
+    ].join('|'), 'i');
+
+    function looksLikeStats(t) {
+        if (/\d/.test(t) && /^[\d\s.,:%kmb·•]+$/i.test(t)) return true;  // "1.2M", "12:34", "437,921"
+        return /\d{1,3}[KMB]?\s*views/i.test(t) || STATS_WORDS.test(t);
+    }
+
+    // Video title from a tile, for keyword blocking. Tries the classic
+    // renderers first, then the newer lockup view-models, then any heading.
+    function getTitleFromNode(node) {
+        const el = node.querySelector(
+            '#video-title, a#video-title-link, ' +
+            '[class*="lockupMetadataViewModelTitle" i], ' +
+            'h3 a[title], h3, h4'
+        );
+        if (el) {
+            const t = cleanText(el.getAttribute && el.getAttribute('title') || el.textContent);
+            if (t) return t;
+        }
+        return '';
+    }
+
+    // Channel display name from a tile's byline when it isn't a link. Covers the
+    // classic ytd-channel-name renderers and the newer view-model lockups, where
+    // the channel is the first metadata row of plain text.
+    function getChannelNameFromTile(node) {
+        const direct = node.querySelector(
+            'ytd-channel-name #text, ytd-channel-name yt-formatted-string, ' +
+            '#channel-name #text, #channel-name yt-formatted-string, ' +
+            '#channel-name a, ytd-channel-name a'
+        );
+        if (direct) {
+            const t = cleanText(direct.textContent);
+            if (t) return t;
+        }
+        // View-model lockups render the channel as the first of several plain
+        // <span> metadata texts (channel, then "N views", "•", date). The class
+        // is camelCase (ytContentMetadataViewModelMetadataText), so match it
+        // case-insensitively and take the first span that isn't a stats line.
+        const rows = node.querySelectorAll(
+            '[class*="MetadataText" i], ' +
+            '[class*="metadata-row" i], ' +
+            '[class*="metadata-text" i]'
+        );
+        for (const r of rows) {
+            const t = cleanText(r.textContent);
+            if (t && !looksLikeStats(t)) return t;
+        }
+        return '';
+    }
+
+    function getChannelInfoFromAnchor(node) {
+        const a = node && node.closest && node.closest('a[href]');
+        if (!a) return null;
+        const href = a.getAttribute('href') || '';
+        const idM = href.match(/\/channel\/(UC[\w-]+)/);
+        const handleM = href.match(/\/@([\w.\-]+)/);
+        if (!idM && !handleM) return null;
+        return {
+            channelId: idM ? idM[1] : '',
+            handle: handleM ? handleM[1] : '',
+            name: (a.textContent || '').trim()
+        };
+    }
+
+    // When sitting on a channel's own page, read its identity from the page,
+    // not just the URL — so legacy custom URLs (/linustechtips, /c/x, /user/x)
+    // resolve too. The canonical link gives the UC id for any URL form, and the
+    // header gives the @handle + display name.
+    function getChannelInfoFromChannelPage() {
+        const browse = document.querySelector('ytd-browse[page-subtype="channels"]');
+        const path = location.pathname;
+        let handle = (path.match(/\/@([\w.\-]+)/) || [])[1] || '';
+        let channelId = (path.match(/\/channel\/(UC[\w-]+)/) || [])[1] || '';
+        if (!handle && !channelId && !browse) return null;   // not a channel page
+
+        if (!channelId) {
+            const canon = document.querySelector('link[rel="canonical"]');
+            const cm = canon && (canon.getAttribute('href') || '').match(/\/channel\/(UC[\w-]+)/);
+            if (cm) channelId = cm[1];
+        }
+        const header = document.querySelector(
+            'yt-page-header-renderer, ytd-browse[page-subtype="channels"] #page-header, #channel-header'
+        );
+        if (!handle && header) {
+            const hLink = header.querySelector('a[href^="/@"]');
+            if (hLink) handle = ((hLink.getAttribute('href') || '').match(/\/@([\w.\-]+)/) || [])[1] || '';
+            if (!handle) {
+                const metaRow = header.querySelector('yt-content-metadata-view-model') || header;
+                const tm = (metaRow.textContent || '').match(/@([\w.\-]{2,})/);
+                if (tm) handle = tm[1];
+            }
+        }
+        const nameEl = document.querySelector(
+            'yt-page-header-renderer h1, yt-dynamic-text-view-model h1, ' +
+            'ytd-channel-name #text, #channel-name #text, #channel-header #text'
+        );
+        const name = nameEl ? cleanText(nameEl.textContent) : '';
+
+        if (!handle && !channelId && !name) return null;
+        return { handle, channelId, name };
+    }
+
+    // On a watch page, read the channel from the owner/uploader byline. Capture
+    // the handle/ID from any owner link AND the display name from the channel
+    // name text (the first link is often the text-less avatar), so name-only
+    // blocks still match. Falls back to microdata early in the page lifecycle.
+    function getWatchPageOwnerInfo() {
+        const owner = document.querySelector('ytd-video-owner-renderer, #owner');
+        if (owner) {
+            let handle = '', channelId = '', name = '';
+            const link = owner.querySelector('a[href*="/channel/"], a[href^="/@"]');
+            if (link) {
+                const href = link.getAttribute('href') || '';
+                const idM = href.match(/\/channel\/(UC[\w-]+)/);
+                const handleM = href.match(/\/@([\w.\-]+)/);
+                if (idM) channelId = idM[1];
+                if (handleM) handle = handleM[1];
+            }
+            const nameEl = owner.querySelector(
+                'ytd-channel-name #text, #channel-name #text, ' +
+                'ytd-channel-name yt-formatted-string, #channel-name a'
+            );
+            if (nameEl) name = cleanText(nameEl.textContent);
+            if (!name) {
+                for (const a of owner.querySelectorAll('a[href^="/@"], a[href*="/channel/"]')) {
+                    const t = cleanText(a.textContent);
+                    if (t) { name = t; break; }
+                }
+            }
+            if (handle || channelId || name) return { handle, channelId, name };
+        }
+        const author = document.querySelector('span[itemprop="author"]');
+        if (author) {
+            const urlEl = author.querySelector('link[itemprop="url"]');
+            const nameEl = author.querySelector('link[itemprop="name"]');
+            const href = urlEl ? (urlEl.getAttribute('href') || '') : '';
+            const idM = href.match(/\/channel\/(UC[\w-]+)/);
+            const handleM = href.match(/\/@([\w.\-]+)/);
+            const name = nameEl ? cleanText(nameEl.getAttribute('content') || '') : '';
+            if (idM || handleM || name) {
+                return { channelId: idM ? idM[1] : '', handle: handleM ? handleM[1] : '', name };
+            }
+        }
+        return null;
+    }
+
+    function tileMatchesBlockedChannel(info) {
+        if (!info) return false;
+        if (info.channelId && blockedIndex.ids.has(info.channelId)) return true;
+        if (info.handle && blockedIndex.handles.has(info.handle.toLowerCase())) return true;
+        if (info.name) {
+            const n = info.name.toLowerCase().trim();
+            if (blockedIndex.names.has(n)) return true;
+            // A handle is usually the display name without spaces
+            // ("Linus Tech Tips" -> "linustechtips"), so match that too.
+            const compact = n.replace(/\s+/g, '');
+            if (compact.length >= 5 && blockedIndex.handles.has(compact)) return true;
+        }
+        return false;
+    }
+
+    function sameChannel(a, b) {
+        if (a.channelId && b.channelId) return a.channelId === b.channelId;
+        if (a.handle && b.handle) return a.handle.toLowerCase() === b.handle.toLowerCase();
+        if (a.name && b.name) return a.name.toLowerCase().trim() === b.name.toLowerCase().trim();
+        return false;
+    }
+
+    /* ==================================================================
+     * 4. Removal passes
+     * ================================================================== */
+    function flattenRows() {
+        document.querySelectorAll('ytd-rich-grid-renderer').forEach(grid => {
+            const outerContents = grid.querySelector(':scope > #contents');
+            if (!outerContents) return;
+            grid.querySelectorAll(':scope > #contents > ytd-rich-grid-row').forEach(row => {
+                const rowContents = row.querySelector(':scope > #contents');
+                if (!rowContents) {
+                    if (!row.children.length) row.remove();
+                    return;
+                }
+                while (rowContents.firstChild) {
+                    outerContents.insertBefore(rowContents.firstChild, row);
+                }
+                row.remove();
+            });
+        });
+    }
+
+    function hideEl(el) {
+        if (el && !el.classList.contains('ytb-removed')) el.classList.add('ytb-removed');
+    }
+
+    // Rich sections (Shorts shelves, news, "Trending", topic rows). Hidden when
+    // blocking Shorts (historic behaviour) or via the dedicated toggle.
+    function removeRichSections() {
+        document.querySelectorAll('ytd-rich-grid-renderer').forEach(grid => {
+            grid.querySelectorAll(':scope > #contents > ytd-rich-section-renderer:not(.ytb-removed)')
+                .forEach(hideEl);
+        });
+    }
+
+    function removeShortsSurfaces() {
+        document.querySelectorAll([
+            'ytd-rich-shelf-renderer[is-shorts]:not(.ytb-removed)',
+            'ytd-reel-shelf-renderer:not(.ytb-removed)',
+            'ytd-reel-item-renderer:not(.ytb-removed)',
+            'ytm-shorts-lockup-view-model:not(.ytb-removed)',
+            'ytm-shorts-lockup-view-model-v2:not(.ytb-removed)'
+        ].join(',')).forEach(hideEl);
+        document.querySelectorAll('a[href*="/shorts/"]').forEach(a => {
+            const cell = a.closest(OUTER_GRID_CELLS) || a.closest('yt-lockup-view-model');
+            if (cell && !cell.classList.contains('ytb-removed')) hideEl(cell);
+        });
+    }
+
+    function removeNonVideoCards() {
+        document.querySelectorAll(NON_VIDEO_CARDS).forEach(card => {
+            const cell = card.closest(OUTER_GRID_CELLS) || card;
+            hideEl(cell);
+        });
+    }
+
+    // Mixes (auto-generated radio) and playlist tiles in feeds. Skipped on
+    // playlist-y pages so the playlist you're actually viewing survives, and
+    // never applied to the watch-page queue panel (its rows aren't tiles).
+    function removeMixesAndPlaylists() {
+        if (settings.hideMixes) {
+            document.querySelectorAll('a[href*="list=RD"], a[href*="start_radio=1"]').forEach(a => {
+                const cell = a.closest(INNER_CONTAINERS) || a.closest(OUTER_GRID_CELLS);
+                if (cell) removeTile(cell);
+            });
+        }
+        if (settings.hidePlaylists &&
+            !location.pathname.startsWith('/playlist') &&
+            !location.pathname.startsWith('/feed/')) {
+            document.querySelectorAll('a[href^="/playlist?"]').forEach(a => {
+                const cell = a.closest(INNER_CONTAINERS) || a.closest(OUTER_GRID_CELLS);
+                if (cell) removeTile(cell);
+            });
+            document.querySelectorAll(
+                'ytd-playlist-renderer:not(.ytb-removed), ytd-grid-playlist-renderer:not(.ytb-removed), ytd-compact-playlist-renderer:not(.ytb-removed), ytd-radio-renderer:not(.ytb-removed), ytd-compact-radio-renderer:not(.ytb-removed)'
+            ).forEach(hideEl);
+        }
+    }
+
+    // Which surface are we on, and is watched-hiding enabled for it?
+    function watchedAllowedHere() {
+        const p = location.pathname;
+        let key = null;
+        if (p === '/watch') key = 'watchedRelated';
+        else if (p === '/') key = 'watchedHome';
+        else if (p.startsWith('/feed/subscriptions')) key = 'watchedSubs';
+        else if (p.startsWith('/results')) key = 'watchedSearch';
+        else if (p.startsWith('/playlist')) key = 'watchedPlaylists';
+        else if (p.startsWith('/@') || p.startsWith('/channel/') ||
+                 p.startsWith('/c/') || p.startsWith('/user/')) key = 'watchedChannel';
+        return key === null ? true : !!settings[key];
+    }
+
+    function processWatchedByProgressBar() {
+        document.querySelectorAll(PROGRESS_SELECTORS).forEach(bar => {
+            if (bar.closest('.ytb-removed')) return;   // tile already hidden
+            const w = bar.style && bar.style.width;
+            if (!w) return;
+            const pct = parseFloat(w);
+            if (isNaN(pct) || pct < settings.watchedThreshold) return;
+            removeContainingTile(bar);
+        });
+    }
+
+    function processWatchedByContainer() {
+        document.querySelectorAll(WATCHED_BAR_CONTAINERS).forEach(container => {
+            if (container.closest('.ytb-removed')) return;   // tile already hidden
+            const widthEls = container.querySelectorAll('[style*="width"]');
+            for (const el of widthEls) {
+                const w = el.style && el.style.width;
+                if (!w) continue;
+                const pct = parseFloat(w);
+                if (isNaN(pct)) continue;
+                if (pct >= settings.watchedThreshold) {
+                    removeContainingTile(container);
+                    return;
+                }
+            }
+        });
+    }
+
+    // Single pass handling blocked video IDs, blocked channels, and keywords.
+    function processTiles() {
+        const checkChannels = state.blockedChannels.length > 0;
+        const checkKeywords = keywordMatchers.length > 0;
+        if (!hiddenSet.size && !checkChannels && !checkKeywords) return;
+        const tiles = document.querySelectorAll(INNER_CONTAINERS);
+        for (const tile of tiles) {
+            if (tile.closest('.ytb-removed')) continue;   // already hidden
+            const id = getVideoIdFromNode(tile);
+            if (hiddenSet.size && id && hiddenSet.has(id)) {
+                removeTile(tile);
+                continue;
+            }
+            if (checkChannels || checkKeywords) {
+                const key = (id || tile.tagName) + '|' + configVersion;
+                if (tile.dataset.ytbChk === key) continue;   // already cleared at this config
+                if (checkChannels && tileMatchesBlockedChannel(getChannelInfoFromNode(tile))) {
+                    removeTile(tile);
+                    continue;
+                }
+                if (checkKeywords) {
+                    const title = getTitleFromNode(tile).toLowerCase();
+                    if (title && keywordMatchers.some(fn => fn(title))) {
+                        removeTile(tile);
+                        continue;
+                    }
+                }
+                tile.dataset.ytbChk = key;
+            }
+        }
+    }
+
+    // The in-player end-screen "video wall" uses its own markup (not ytd-* tiles)
+    // and has no watched indicator, so apply the hidden-id and blocked-channel
+    // lists here. (Use Ctrl+right-click to hide an individual one.)
+    function processEndScreen() {
+        if (!hiddenSet.size && !state.blockedChannels.length) return;
+        const stills = document.querySelectorAll('a.ytp-videowall-still, a.ytp-modern-videowall-still');
+        for (const still of stills) {
+            if (still.style.display === 'none') continue;
+            const id = videoIdFromHref(still.getAttribute('href') || still.href || '');
+            if (id && hiddenSet.has(id)) { still.style.display = 'none'; continue; }
+            if (state.blockedChannels.length) {
+                const author = still.querySelector('[class*="still-info-author"]');
+                const name = author ? (author.textContent || '').split('•')[0].trim() : '';
+                if (name && tileMatchesBlockedChannel({ handle: '', channelId: '', name })) {
+                    still.style.display = 'none';
+                }
+            }
+        }
+    }
+
+    // Merge any identifiers found on the current page into a matching block
+    // entry, so a block made with only one identifier (e.g. an @handle) learns
+    // the others (name, UC id) and starts matching every surface.
+    function enrichBlockedChannel(info) {
+        if (!info) return;
+        let changed = false;
+        for (const c of state.blockedChannels) {
+            if (!sameChannel(c, info)) continue;
+            if (info.handle && !c.handle) { c.handle = info.handle; changed = true; }
+            if (info.channelId && !c.channelId) { c.channelId = info.channelId; changed = true; }
+            if (info.name && !c.name) { c.name = info.name; changed = true; }
+        }
+        if (changed) { rebuildDerived(); saveOnly(); }
+    }
+
+    // Channel identity of the page itself (watch-page owner or channel page).
+    // Computed once per pass in runAll and shared by enrichment + blackout.
+    function getCurrentPageChannelInfo() {
+        return location.pathname === '/watch'
+            ? getWatchPageOwnerInfo()
+            : getChannelInfoFromChannelPage();
+    }
+
+    function enrichFromCurrentPage(pageInfo) {
+        if (pageInfo && tileMatchesBlockedChannel(pageInfo)) enrichBlockedChannel(pageInfo);
+    }
+
+    function runAll() {
+        if (retired) return;
+        try {
+            // Master switch: undo our footprint and stop. The storage listener
+            // stays live, so flipping it back on recovers without a reload.
+            if (!settings.enabled) {
+                clearBlackout();
+                unhideAll();
+                if (boostGain) boostGain.gain.value = 1;
+                const slider = document.getElementById('ytb-boost-slider');
+                if (slider) slider.remove();
+                return;
+            }
+            // flattenRows() intentionally not called: physically moving every
+            // tile out of its row generated add/remove churn and fought the
+            // renderer. The display:contents CSS already reflows the grid.
+            if (settings.blockShorts) removeShortsSurfaces();
+            if (settings.blockShorts || settings.hideNewsShelves) removeRichSections();
+            if (settings.hidePromos) removeNonVideoCards();
+            if (settings.hideMixes || settings.hidePlaylists) removeMixesAndPlaylists();
+            if (settings.hideWatched && watchedAllowedHere()) {
+                processWatchedByProgressBar();
+                processWatchedByContainer();
+            }
+            // Page identity is only needed when channels are blocked; resolve it
+            // once and share it between enrichment and blackout.
+            const pageInfo = state.blockedChannels.length ? getCurrentPageChannelInfo() : null;
+            enrichFromCurrentPage(pageInfo);   // learn missing identifiers, rebuild index if changed
+            processTiles();                    // then hide tiles using the enriched index
+            processEndScreen();                // and the in-player end-screen suggestions
+            // Menu scanning is expensive (*[role="menuitem"]); only do it shortly
+            // after a press, when a menu may actually have opened.
+            if (Date.now() - lastPointerDown < 3000) injectBlockChannelMenuItem();
+            processBlackout(pageInfo);
+            if (settings.maxQuality && !blackoutActive) applyMaxQuality();
+            applyVolumeBoost();
+            ensureWheelListener();
+            ensureBoostSlider();
+        } catch (e) {
+            console.warn('[YT Blocker] pass error:', e);
+        } finally {
+            // ALWAYS reveal anti-flash-hidden tiles, even if something above threw
+            // — otherwise a mid-pass error could leave watched-hidden content
+            // (e.g. the recommendations sidebar) stuck invisible until reload.
+            if (settings.enabled && settings.reduceFlashing && settings.hideWatched) {
+                try { revealRemainingWatched(); } catch (e) { /* ignore */ }
+            }
+        }
+    }
+
+    /* ==================================================================
+     * 5. Actions (hide video / block channel) + native don't-recommend
+     * ================================================================== */
+    function undoHideVideo(id) {
+        const i = state.hiddenVideoIds.indexOf(id);
+        if (i >= 0) state.hiddenVideoIds.splice(i, 1);
+        unhideAll();   // pass re-hides anything that should stay hidden
+        persist();
+    }
+
+    function undoBlockChannel(info) {
+        state.blockedChannels = state.blockedChannels.filter(c => !sameChannel(c, info));
+        unhideAll();
+        persist();
+    }
+
+    function hideVideoAtTarget(target) {
+        const tile = findTileFromTarget(target);
+        if (!tile) { toast('No video tile under the cursor.'); return; }
+        const id = getVideoIdFromNode(tile);
+        if (!id) { toast('Could not read a video ID here.'); return; }
+        if (!hiddenSet.has(id)) state.hiddenVideoIds.push(id);
+        removeTile(tile);
+        persist();
+        toast('Hid video', id, () => undoHideVideo(id));
+    }
+
+    function channelLabel(info) {
+        return info.name || (info.handle ? '@' + info.handle : info.channelId);
+    }
+
+    // Adds to the block list (no persist). Returns true if it was already present.
+    function addChannelToList(info) {
+        const already = state.blockedChannels.some(c => sameChannel(c, info));
+        if (!already) {
+            state.blockedChannels.push({
+                name: info.name || '',
+                handle: info.handle || '',
+                channelId: info.channelId || '',
+                addedAt: Date.now()
+            });
+        }
+        return already;
+    }
+
+    // Right-click path (browser context menu). Opens the native menu fresh to
+    // attempt "Don't recommend channel".
+    function blockChannelAtTarget(target) {
+        const tile = findTileFromTarget(target);
+        // On a tile, attribute ONLY to that tile (never the watched video).
+        // Off a tile, try a clicked channel link, the channel page, then the
+        // watch-page owner.
+        const info = tile
+            ? getChannelInfoFromNode(tile)
+            : (getChannelInfoFromAnchor(target) ||
+               getChannelInfoFromChannelPage() ||
+               getWatchPageOwnerInfo());
+        if (!info || (!info.handle && !info.channelId && !info.name)) {
+            toast('Could not detect a channel here. Try right-clicking the channel name.');
+            return;
+        }
+        const already = addChannelToList(info);
+        persist();
+        toast(already ? 'Already blocking' : 'Blocked channel', channelLabel(info),
+              already ? null : () => undoBlockChannel(info));
+    }
+
+    /* ==================================================================
+     * 5b. Inject a "Block channel" item into YouTube's native 3-dot menu
+     * ================================================================== */
+    // Selector covering both the classic (ytd-*) and newer (view-model) menus.
+    const MENU_ITEM_SELECTOR = [
+        'ytd-menu-service-item-renderer',
+        'ytd-menu-navigation-item-renderer',
+        'yt-list-item-view-model',
+        'tp-yt-paper-item',
+        '*[role="menuitem"]'
+    ].join(',');
+
+    // "Don't recommend channel" in YouTube's most common UI languages — used
+    // only to LOCATE the native item as an insertion anchor for our own
+    // "Block channel" menu entry (never clicked). Lowercase, straight quotes.
+    const DNR_TEXTS = [
+        "don't recommend channel", 'dont recommend channel',
+        'kanal nicht empfehlen',                          // de
+        'no recomendar canal', 'no recomendar este canal',// es
+        'ne pas recommander la chaîne',                   // fr
+        'non consigliare il canale',                      // it
+        'não recomendar canal', 'não recomendar o canal', // pt
+        'kanaal niet aanbevelen',                         // nl
+        'nie polecaj filmów z tego kanału',               // pl
+        'не рекомендовать видео с этого канала',          // ru
+        'kanalı önerme',                                  // tr
+        'チャンネルをおすすめに表示しない',                  // ja
+        '채널 추천 안함',                                  // ko
+        '不再推荐此频道', '不再推薦此頻道'                    // zh
+    ];
+
+    function isDnrText(raw) {
+        if (!raw) return false;
+        const t = raw.replace(/[’‘]/g, "'").trim().toLowerCase();
+        if (!t) return false;
+        return DNR_TEXTS.some(s => t.includes(s));
+    }
+
+    function isVisible(el) {
+        return el && el.offsetParent !== null;
+    }
+
+    // Locate the currently-open video action menu regardless of which menu
+    // implementation YouTube is using. Returns the items container + the
+    // "Don't recommend channel" node (if present) to anchor insertion.
+    function findOpenVideoMenu() {
+        const nodes = document.querySelectorAll(MENU_ITEM_SELECTOR);
+        let dnr = null, signal = null;
+        for (const it of nodes) {
+            if (it.classList && it.classList.contains('ytb-menu-item')) continue;
+            if (!isVisible(it)) continue;
+            const t = (it.textContent || '').trim().toLowerCase();
+            if (!t) continue;
+            if (isDnrText(t)) {
+                dnr = it;
+            } else if (!signal &&
+                       (t.includes('add to queue') || t.includes('save to watch later') ||
+                        t.includes('save to playlist'))) {
+                signal = it;
+            }
+        }
+        let anchor = dnr || signal;
+        // Non-English UIs won't match the English signal strings. If the menu
+        // was opened from a tile's 3-dot button (menuOwnerTile), any visible
+        // popup menu is the video menu, so anchor on its last item instead.
+        if (!anchor && menuOwnerTile) {
+            const popupItems = document.querySelectorAll('ytd-popup-container ' + MENU_ITEM_SELECTOR.split(',').join(',ytd-popup-container '));
+            for (const it of popupItems) {
+                if (it.classList && it.classList.contains('ytb-menu-item')) continue;
+                if (isVisible(it) && (it.textContent || '').trim()) anchor = it;
+            }
+        }
+        if (!anchor || !anchor.parentNode) return null;
+        return { container: anchor.parentNode, dnr };
+    }
+
+    function closeNativeMenu() {
+        try {
+            const dd = document.querySelector('ytd-popup-container tp-yt-iron-dropdown');
+            if (dd && typeof dd.close === 'function') { dd.close(); return; }
+        } catch (e) { /* fall through */ }
+        document.body.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Escape', keyCode: 27, which: 27, bubbles: true
+        }));
+    }
+
+    // Channel for the menu that is currently open. When the menu was opened
+    // from a tile, attribute ONLY to that tile — never fall back to the watch
+    // page owner, or blocking from a recommendation would block the video you
+    // are watching. The page owner is used only for the main video's own menu.
+    function resolveMenuChannelInfo() {
+        if (menuOwnerTile) return getChannelInfoFromNode(menuOwnerTile);
+        if (menuOwnerIsMain) return getWatchPageOwnerInfo();
+        return null;
+    }
+
+    function onInjectedBlockClick(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        const info = e.currentTarget._info || resolveMenuChannelInfo();
+        if (!info || (!info.handle && !info.channelId && !info.name)) {
+            toast('Could not detect a channel for this menu.');
+            // Diagnostic: expand this element in the console and share its markup
+            // if a tile's channel still can't be read.
+            console.warn('[YT Blocker] Could not detect channel. Menu owner tile:', menuOwnerTile);
+            closeNativeMenu();
+            return;
+        }
+        const already = addChannelToList(info);
+        closeNativeMenu();
+        persist();
+        toast(already ? 'Already blocking' : 'Blocked channel', channelLabel(info),
+              already ? null : () => undoBlockChannel(info));
+    }
+
+    function svgEl(name, attrs) {
+        const e = document.createElementNS('http://www.w3.org/2000/svg', name);
+        for (const k in attrs) e.setAttribute(k, attrs[k]);
+        return e;
+    }
+
+    function buildMenuItem(info) {
+        const el = document.createElement('div');
+        el.className = 'ytb-menu-item';
+        el.setAttribute('role', 'menuitem');
+        el.tabIndex = 0;
+        el._info = info;
+        el._ownerTile = menuOwnerTile;
+        const icon = document.createElement('div');
+        icon.className = 'ytb-mi-icon';
+        const svg = svgEl('svg', { viewBox: '0 0 24 24', 'stroke-width': '2', 'stroke-linecap': 'round' });
+        svg.appendChild(svgEl('circle', { cx: 12, cy: 12, r: 9 }));
+        svg.appendChild(svgEl('line', { x1: 5.6, y1: 5.6, x2: 18.4, y2: 18.4 }));
+        icon.appendChild(svg);
+        const text = document.createElement('div');
+        text.className = 'ytb-mi-text';
+        text.textContent = 'Block channel';
+        el.appendChild(icon);
+        el.appendChild(text);
+        el.addEventListener('click', onInjectedBlockClick);
+        el.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') onInjectedBlockClick(ev);
+        });
+        return el;
+    }
+
+    function injectBlockChannelMenuItem() {
+        const menu = findOpenVideoMenu();
+        if (!menu) {
+            // No video menu open — drop any stray injected item.
+            document.querySelectorAll('.ytb-menu-item').forEach(el => el.remove());
+            return;
+        }
+        const existing = menu.container.querySelector('.ytb-menu-item');
+        if (existing) {
+            if (existing._ownerTile === menuOwnerTile) return;  // still the same menu
+            existing.remove();                                  // owner changed — refresh
+        }
+        const item = buildMenuItem(resolveMenuChannelInfo());
+        if (menu.dnr && menu.dnr.parentNode === menu.container) {
+            menu.container.insertBefore(item, menu.dnr.nextSibling);
+        } else {
+            menu.container.appendChild(item);
+        }
+    }
+
+    /* ==================================================================
+     * 5c. Blackout: if the current page is a blocked channel (its channel
+     *     page, or a watch page for one of its videos), stop playback and
+     *     hide the content behind a black panel — keeping the recommendations
+     *     rail. Best-effort at preventing a view from being registered.
+     * ================================================================== */
+    function ensureNoPlayHook(v) {
+        if (v.dataset.ytbHook === INSTANCE_ID) return;
+        v.dataset.ytbHook = INSTANCE_ID;
+        // YouTube reuses one <video> across SPA navigations, so the guard must
+        // read the live flag rather than pausing unconditionally.
+        const guard = () => { if (blackoutActive && !retired) { try { v.pause(); } catch (e) {} } };
+        v.addEventListener('play', guard, true);
+        v.addEventListener('playing', guard, true);
+        v.addEventListener('loadeddata', guard, true);
+    }
+
+    function stopPlayback() {
+        const v = document.querySelector('video');
+        if (!v) return;
+        ensureNoPlayHook(v);
+        try { v.pause(); } catch (e) {}
+    }
+
+    function blackoutLabel(info) {
+        return info.name || (info.handle ? '@' + info.handle : info.channelId) || 'This channel';
+    }
+
+    function buildBlackoutPanel() {
+        const panel = document.createElement('div');
+        panel.id = 'ytb-blackout-panel';
+        panel.dataset.ytbOwner = INSTANCE_ID;
+        const icon = document.createElement('div');
+        icon.className = 'ytb-bo-icon';
+        icon.textContent = '🚫';
+        const title = document.createElement('div');
+        title.className = 'ytb-bo-title';
+        title.textContent = 'Channel blocked';
+        const sub = document.createElement('div');
+        sub.className = 'ytb-bo-sub';
+        const actions = document.createElement('div');
+        actions.className = 'ytb-bo-actions';
+        const unblock = document.createElement('button');
+        unblock.className = 'ytb-bo-btn';
+        unblock.textContent = 'Unblock this channel';
+        unblock.addEventListener('click', () => {
+            if (panel._info) unblockChannel(panel._info);
+        });
+        actions.appendChild(unblock);
+        panel.appendChild(icon);
+        panel.appendChild(title);
+        panel.appendChild(sub);
+        panel.appendChild(actions);
+        return panel;
+    }
+
+    function setPanelInfo(panel, info) {
+        panel._info = info;
+        const sub = panel.querySelector('.ytb-bo-sub');
+        if (sub) {
+            sub.textContent = blackoutLabel(info) +
+                ' is on your block list — its video, thumbnail and view count are not loaded.';
+        }
+    }
+
+    function placePanel(container, info, asFirstChild) {
+        if (!container) return;
+        let panel = document.getElementById('ytb-blackout-panel');
+        // Rebuild a panel left by a previous instance — its button listeners
+        // point at a dead sandbox.
+        if (panel && panel.dataset.ytbOwner !== INSTANCE_ID) { panel.remove(); panel = null; }
+        if (!panel) panel = buildBlackoutPanel();
+        if (panel.parentNode !== container) {
+            if (asFirstChild) container.insertBefore(panel, container.firstChild);
+            else container.appendChild(panel);
+        }
+        setPanelInfo(panel, info);
+    }
+
+    function currentBlockedPage(pageInfo) {
+        if (!pageInfo || !tileMatchesBlockedChannel(pageInfo)) return null;
+        return { type: location.pathname === '/watch' ? 'watch' : 'channel', info: pageInfo };
+    }
+
+    function clearBlackout() {
+        if (!blackoutActive && !document.getElementById('ytb-blackout-panel')) return;
+        blackoutActive = false;
+        document.querySelectorAll('.ytb-blackout').forEach(el => el.classList.remove('ytb-blackout'));
+        const p = document.getElementById('ytb-blackout-panel');
+        if (p) p.remove();
+    }
+
+    function processBlackout(pageInfo) {
+        if (!settings.blackoutBlockedChannels) { clearBlackout(); return; }
+        const hit = currentBlockedPage(pageInfo);
+        if (!hit) { clearBlackout(); return; }
+        blackoutActive = true;
+        stopPlayback();
+        if (hit.type === 'watch') {
+            const flexy = document.querySelector('ytd-watch-flexy');
+            if (flexy) flexy.classList.add('ytb-blackout');
+            const primaryInner = document.querySelector('ytd-watch-flexy #primary-inner') ||
+                                 document.querySelector('#primary-inner');
+            placePanel(primaryInner || flexy || document.body, hit.info, true);
+        } else {
+            const browse = document.querySelector('ytd-browse[page-subtype="channels"]') ||
+                           document.querySelector('ytd-browse');
+            if (browse) browse.classList.add('ytb-blackout');
+            placePanel(browse || document.querySelector('#page-manager') || document.body, hit.info, true);
+        }
+    }
+
+    async function unblockChannel(info) {
+        state.blockedChannels = state.blockedChannels.filter(c => !sameChannel(c, info));
+        await persist();
+        // Content was never loaded, so reload to bring the page back cleanly.
+        location.reload();
+    }
+
+    /* ==================================================================
+     * 5d. Force the player to the highest available quality, once per video.
+     *     The player API lives in the page world. Firefox exposes it to the
+     *     content script via wrappedJSObject; Chromium content scripts are
+     *     fully isolated, so there the request is relayed by postMessage to
+     *     src/page-quality.js (a MAIN-world script, Chromium manifest only),
+     *     which answers "done" once the player accepted the change.
+     * ================================================================== */
+    window.addEventListener('message', (e) => {
+        if (e.source === window && e.data && e.data.type === 'ytb-max-quality-done' && e.data.vid) {
+            lastQualityVideoId = e.data.vid;
+        }
+    });
+
+    function applyMaxQuality() {
+        if (location.pathname !== '/watch') return;
+        const vid = new URLSearchParams(location.search).get('v');
+        if (!vid || vid === lastQualityVideoId) return;   // already done this video
+        const player = document.getElementById('movie_player');
+        if (!player) return;
+        const pApi = player.wrappedJSObject || player;
+        if (typeof pApi.getAvailableQualityLevels !== 'function') {
+            window.postMessage({ type: 'ytb-max-quality', vid }, location.origin);
+            return;
+        }
+        let levels;
+        try { levels = pApi.getAvailableQualityLevels(); } catch (e) { return; }
+        if (!levels || !levels.length) return;            // player not ready yet
+        const best = levels[0];                           // ordered highest -> lowest
+        try {
+            if (typeof pApi.setPlaybackQualityRange === 'function') pApi.setPlaybackQualityRange(best, best);
+            if (typeof pApi.setPlaybackQuality === 'function') pApi.setPlaybackQuality(best);
+            lastQualityVideoId = vid;
+        } catch (e) { /* ignore */ }
+    }
+
+    /* ==================================================================
+     * 5e. Volume boost (Web Audio gain on top of YouTube's own volume).
+     *     The graph is ONLY built once boost is turned up, and only from a
+     *     user gesture — so default users keep untouched native audio, and we
+     *     never route the element through a suspended context (which would mute
+     *     it). createMediaElementSource can run once per element; YouTube reuses
+     *     one <video>, so the graph persists across navigations.
+     * ================================================================== */
+    let audioCtx = null, boostGain = null;
+
+    function ensureBoostGraph() {
+        const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
+        if (!v) return false;
+        // Only trust a wired flag WE set: a flag from a previous (updated-away)
+        // instance means the graph belongs to a dead sandbox — try to re-wire.
+        if (v.dataset.ytbBoostWired === INSTANCE_ID) return !!boostGain;
+        try {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            if (!AC) return false;
+            if (!audioCtx) audioCtx = new AC();
+            const src = audioCtx.createMediaElementSource(v);
+            boostGain = audioCtx.createGain();
+            src.connect(boostGain);
+            boostGain.connect(audioCtx.destination);
+            v.dataset.ytbBoostWired = INSTANCE_ID;
+            return true;
+        } catch (e) {
+            // Typically: the element is still claimed by a dead instance's
+            // AudioContext after an in-place update. A page reload fixes it.
+            console.warn('[YT Blocker] volume boost unavailable (reload the page if the addon just updated):', e);
+            return false;
+        }
+    }
+
+    // Keep the gain synced. Never wires the graph itself (that needs a gesture).
+    function applyVolumeBoost() {
+        if (!boostGain) return;
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+        boostGain.gain.value = settings.volumeBoost || 1;
+    }
+
+    // Called from user gestures (wheel / slider) so the AudioContext can run.
+    let boostSaveTimer = null;
+    function setVolumeBoost(mult) {
+        mult = Math.min(5, Math.max(1, mult));
+        state.settings.volumeBoost = mult;
+        settings.volumeBoost = mult;
+        if (mult > 1) ensureBoostGraph();
+        applyVolumeBoost();
+        // Debounce persistence — wheel scrolling fires many times.
+        clearTimeout(boostSaveTimer);
+        boostSaveTimer = setTimeout(saveOnly, 500);
+    }
+
+    function showVolumeOverlay(text) {
+        let el = document.getElementById('ytb-vol-overlay');
+        const player = document.getElementById('movie_player');
+        if (!player) return;
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'ytb-vol-overlay';
+            player.appendChild(el);
+        }
+        el.textContent = text;
+        el.classList.add('ytb-show');
+        clearTimeout(el._t);
+        el._t = setTimeout(() => el.classList.remove('ytb-show'), 900);
+    }
+
+    // Attach the wheel handler to the player itself (not document): a
+    // non-passive document-level wheel listener forces every scroll on the
+    // page through JS and janks scrolling everywhere. YouTube reuses one
+    // #movie_player across SPA navigations, so this wires at most once.
+    function ensureWheelListener() {
+        const player = document.getElementById('movie_player');
+        if (!player || player.dataset.ytbWheel === INSTANCE_ID) return;
+        player.dataset.ytbWheel = INSTANCE_ID;
+        player.addEventListener('wheel', onPlayerWheel, { capture: true, passive: false });
+    }
+
+    // Scroll over the player to change volume (0-100 native, 100-500 boosted).
+    function onPlayerWheel(e) {
+        if (retired) return;
+        if (!settings.enabled || !settings.wheelVolume) return;
+        if (location.pathname !== '/watch') return;
+        if (!e.target.closest || !e.target.closest('#movie_player')) return;
+        const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
+        if (!v) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const cur = Math.round((settings.volumeBoost > 1) ? settings.volumeBoost * 100 : (v.muted ? 0 : v.volume) * 100);
+        let next = cur + (e.deltaY < 0 ? 5 : -5);
+        next = Math.min(500, Math.max(0, Math.round(next)));
+        if (next <= 100) {
+            if (v.muted) v.muted = false;
+            v.volume = next / 100;
+            setVolumeBoost(1);
+        } else {
+            if (v.muted) v.muted = false;
+            v.volume = 1;
+            setVolumeBoost(next / 100);
+        }
+        showVolumeOverlay('🔊 ' + next + '%');
+        updateBoostUI();
+    }
+
+    // Visible in-player control: a second slider inline next to YouTube's own
+    // volume control. It only appears once native volume sits at 100% and
+    // extends it to 500% (Web Audio boost). Pulling the native slider back
+    // below 100% resets the boost to off and hides the slider again.
+    function playerVideo() {
+        return document.querySelector('video.html5-main-video') || document.querySelector('video');
+    }
+
+    function nativeAtMax(v) {
+        return !!v && !v.muted && v.volume >= 0.999;
+    }
+
+    function updateBoostUI() {
+        if (retired) return;
+        const wrap = document.getElementById('ytb-boost-slider');
+        if (!wrap || wrap.dataset.ytbOwner !== INSTANCE_ID) return;
+        const v = playerVideo();
+        const atMax = nativeAtMax(v);
+        // Native volume dropped below 100%: boost turns off and the slider hides.
+        if (!atMax && (settings.volumeBoost || 1) > 1) setVolumeBoost(1);
+        wrap.classList.toggle('ytb-hide', !atMax);
+        const input = wrap.querySelector('input');
+        const label = wrap.querySelector('.ytb-bs-label');
+        const pct = Math.round((settings.volumeBoost || 1) * 100);
+        if (input && document.activeElement !== input) input.value = pct;
+        if (label) label.textContent = pct + '%';
+        wrap.classList.toggle('ytb-boosting', pct > 100);
+    }
+
+    function ensureBoostSlider() {
+        let existing = document.getElementById('ytb-boost-slider');
+        // A slider built by a previous (updated-away) instance has listeners
+        // bound to a dead sandbox — rebuild it as ours.
+        if (existing && existing.dataset.ytbOwner !== INSTANCE_ID) {
+            existing.remove();
+            existing = null;
+        }
+        if (location.pathname !== '/watch' || !settings.wheelVolume) {
+            if (existing) existing.remove();
+            return;
+        }
+        const volArea = document.querySelector('#movie_player .ytp-volume-area') ||
+                        document.querySelector('#movie_player .ytp-volume-panel');
+        if (!volArea || !volArea.parentNode) return;
+        let wrap = existing;
+        if (!wrap) {
+            wrap = document.createElement('div');
+            wrap.id = 'ytb-boost-slider';
+            wrap.dataset.ytbOwner = INSTANCE_ID;
+            wrap.title = 'Volume boost — shown while volume is at 100%. Click the % to reset.';
+            const input = document.createElement('input');
+            input.type = 'range';
+            input.min = '100';
+            input.max = '500';
+            input.step = '5';
+            const label = document.createElement('span');
+            label.className = 'ytb-bs-label';
+            wrap.appendChild(input);
+            wrap.appendChild(label);
+            input.addEventListener('input', (e) => {
+                e.stopPropagation();
+                const pct = parseInt(input.value, 10) || 100;
+                const v = playerVideo();
+                if (v) { if (v.muted) v.muted = false; v.volume = 1; }
+                setVolumeBoost(pct / 100);
+                updateBoostUI();
+                showVolumeOverlay('🔊 ' + pct + '%');
+            });
+            label.addEventListener('click', (e) => {
+                e.stopPropagation();
+                setVolumeBoost(1);
+                updateBoostUI();
+            });
+        }
+        if (wrap.parentNode !== volArea.parentNode || wrap.previousElementSibling !== volArea) {
+            volArea.parentNode.insertBefore(wrap, volArea.nextSibling);
+        }
+        const v = playerVideo();
+        if (v && v.dataset.ytbVolListener !== INSTANCE_ID) {
+            v.dataset.ytbVolListener = INSTANCE_ID;
+            v.addEventListener('volumechange', updateBoostUI);
+        }
+        updateBoostUI();
+    }
+
+    /* ==================================================================
+     * 6. Toast
+     * ================================================================== */
+    let toastTimer = null;
+    function toast(message, accent, onUndo) {
+        let el = document.getElementById('ytb-toast');
+        if (!el) {
+            if (!document.body) return;
+            el = document.createElement('div');
+            el.id = 'ytb-toast';
+            document.body.appendChild(el);
+        }
+        el.textContent = message;
+        if (accent) {
+            el.appendChild(document.createTextNode(' '));
+            const span = document.createElement('span');
+            span.className = 'ytb-toast-accent';
+            span.textContent = accent;
+            el.appendChild(span);
+        }
+        if (onUndo) {
+            const btn = document.createElement('button');
+            btn.className = 'ytb-undo';
+            btn.textContent = 'Undo';
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                el.classList.remove('ytb-show');
+                try { onUndo(); } catch (err) { /* ignore */ }
+            });
+            el.appendChild(btn);
+        }
+        // force reflow so the transition replays
+        void el.offsetWidth;
+        el.classList.add('ytb-show');
+        clearTimeout(toastTimer);
+        // Leave more time to hit Undo when it's offered.
+        toastTimer = setTimeout(() => el.classList.remove('ytb-show'), onUndo ? 5000 : 2600);
+    }
+
+    /* ==================================================================
+     * 7. Wiring: context-menu target tracking + background messages
+     * ================================================================== */
+    document.addEventListener('contextmenu', (e) => {
+        if (retired) return;
+        lastContextTarget = e.target;
+        // Ctrl+right-click = hide this video immediately (works on normal tiles
+        // AND in-player end-screen suggestions). Ctrl is used rather than plain
+        // right-click so the normal menu still works, and rather than Shift
+        // because Firefox bypasses page handlers when Shift is held.
+        if (!e.ctrlKey || !e.target.closest) return;
+        const still = e.target.closest('a.ytp-videowall-still, a.ytp-modern-videowall-still');
+        const tile = still ? null : findTileFromTarget(e.target);
+        if (!still && !tile) return;
+        const id = still
+            ? videoIdFromHref(still.getAttribute('href') || still.href || '')
+            : getVideoIdFromNode(tile);
+        if (!id) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (!hiddenSet.has(id)) state.hiddenVideoIds.push(id);
+        if (still) still.style.display = 'none';
+        else removeTile(tile);
+        persist();
+        toast('Hid video', id, () => {
+            if (still) still.style.display = '';
+            undoHideVideo(id);
+        });
+    }, true);
+
+    // Record which tile a menu is opened from. The 3-dot button lives inside
+    // the tile, so closest(INNER_CONTAINERS) on the pressed element gives the
+    // owning tile — independent of the (changing) menu-button markup. If the
+    // press is in the main watch video's metadata instead, flag that so we
+    // attribute to the page owner rather than a stale tile.
+    document.addEventListener('pointerdown', (e) => {
+        if (retired) return;
+        lastPointerDown = Date.now();
+        // First user gesture: if a boost was persisted, wire the graph now (so
+        // the AudioContext can run rather than muting the element).
+        if ((settings.volumeBoost || 1) > 1 && !boostGain) { ensureBoostGraph(); applyVolumeBoost(); }
+        if (!e.target.closest) return;
+        const tile = e.target.closest(INNER_CONTAINERS);
+        if (tile) {
+            menuOwnerTile = tile;
+            menuOwnerIsMain = false;
+        } else if (e.target.closest('ytd-watch-metadata, #above-the-fold')) {
+            menuOwnerTile = null;
+            menuOwnerIsMain = true;
+        }
+        // Anything else (e.g. our own popup item) leaves the attribution intact.
+    }, true);
+
+    api.runtime.onMessage.addListener((msg) => {
+        if (!msg || !msg.action) return;
+        switch (msg.action) {
+            case 'ytb-block-channel': blockChannelAtTarget(lastContextTarget); break;
+            case 'ytb-hide-video':    hideVideoAtTarget(lastContextTarget); break;
+        }
+    });
+
+    api.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local' || !changes[STORAGE_KEY]) return;
+        const incoming = JSON.stringify(normalize(changes[STORAGE_KEY].newValue));
+        if (incoming === lastSerialized) return;     // our own write echoing back
+        lastSerialized = incoming;
+        state = normalize(changes[STORAGE_KEY].newValue);
+        rebuildDerived();
+        runAll();
+    });
+
+    /* ==================================================================
+     * 8. Console helpers (parity with the old userscript, on YouTube pages)
+     * ================================================================== */
+    window.ytsbListHidden = () => [...hiddenSet];
+    window.ytsbListChannels = () => state.blockedChannels.slice();
+    window.ytsbUnhide = (id) => {
+        const i = state.hiddenVideoIds.indexOf(id);
+        if (i < 0) return false;
+        state.hiddenVideoIds.splice(i, 1);
+        persist();
+        return true;
+    };
+    window.ytsbResetHidden = () => {
+        const n = state.hiddenVideoIds.length;
+        state.hiddenVideoIds = [];
+        persist();
+        return n;
+    };
+
+    /* ==================================================================
+     * 9. Boot
+     * ================================================================== */
+    function bootObserver() {
+        if (!document.body) {
+            requestAnimationFrame(bootObserver);
+            return;
+        }
+        // Debounce: coalesce bursts of mutations — and our own tile removals —
+        // into a single pass after things settle, instead of running every
+        // frame. This is what keeps channel pages with thousands of tiles from
+        // locking up (each pass does several full-document scans).
+        let debounceTimer = null;
+        let pendingWhileHidden = false;
+        // Background watch pages still need passes so a blocked channel's
+        // video gets blacked out / paused before it racks up watch time.
+        const mustRunHidden = () =>
+            settings.enabled &&
+            settings.blackoutBlockedChannels &&
+            state.blockedChannels.length &&
+            location.pathname === '/watch';
+        const schedule = () => {
+            // Don't burn CPU scanning a background tab; catch up on return.
+            if (document.hidden && !mustRunHidden()) { pendingWhileHidden = true; return; }
+            if (debounceTimer) return;
+            debounceTimer = setTimeout(() => { debounceTimer = null; runAll(); }, 200);
+        };
+        // Only react to added/removed nodes. Watching attribute churn
+        // (style/class) fired constantly on YouTube and dominated CPU; the
+        // interval below is the safety net for anything attribute-driven.
+        const observer = new MutationObserver(schedule);
+        observer.observe(document.body, { childList: true, subtree: true });
+        runAll();
+        setInterval(() => { if (!document.hidden || mustRunHidden()) runAll(); }, 2000);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && pendingWhileHidden) {
+                pendingWhileHidden = false;
+                runAll();
+            }
+        });
+
+        // Shorts redirect lifecycle
+        redirectShortsUrl();
+        document.addEventListener('yt-navigate-start', redirectShortsUrl, true);
+        document.addEventListener('yt-navigate-finish', redirectShortsUrl, true);
+
+        // Blackout lifecycle: drop it optimistically when navigation starts so a
+        // good video isn't held paused, then re-evaluate when the page settles.
+        document.addEventListener('yt-navigate-start', clearBlackout, true);
+        document.addEventListener('yt-navigate-finish', runAll, true);
+        let lastHref = location.href;
+        setInterval(() => {
+            if (location.href !== lastHref) {
+                lastHref = location.href;
+                redirectShortsUrl();
+            }
+        }, 500);
+    }
+
+    async function init() {
+        // Tell any previous (orphaned) instance to stand down, THEN start
+        // listening so a future update can retire us the same way. The
+        // dispatch is synchronous, so ordering avoids retiring ourselves.
+        try {
+            document.dispatchEvent(new CustomEvent(TAKEOVER_EVENT));
+            document.addEventListener(TAKEOVER_EVENT, () => { retired = true; }, true);
+        } catch (e) { /* ignore */ }
+        try {
+            const stored = await api.storage.local.get(STORAGE_KEY);
+            state = normalize(stored[STORAGE_KEY]);
+        } catch (e) {
+            state = normalize(null);
+        }
+        lastSerialized = JSON.stringify(state);
+        rebuildDerived();
+        if (migrateLegacyLocalStorage()) persist();   // one-time import of old list
+        bootObserver();
+    }
+
+    init();
+})();

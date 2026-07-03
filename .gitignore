@@ -1,0 +1,6 @@
+# Packaged builds for the Chrome Web Store
+*.zip
+
+# Dependencies / tooling
+node_modules/
+*.log

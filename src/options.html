@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>YouTube Blocker — Manage</title>
+    <link rel="stylesheet" href="ui.css">
+    <style>
+        body { max-width: 720px; margin: 0 auto; }
+        .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+        @media (max-width: 620px) { .twocol { grid-template-columns: 1fr; } }
+        .twocol .section { border-right: 1px solid var(--border); }
+        .twocol .section:last-child { border-right: none; }
+        .subtoggles { margin-left: 26px; display: grid; grid-template-columns: 1fr 1fr; }
+        .subtoggles label.toggle { padding: 3px 0; }
+        .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+        .chip {
+            display: inline-flex; align-items: center; gap: 6px;
+            background: var(--panel-2); border: 1px solid var(--border);
+            border-radius: 999px; padding: 3px 6px 3px 12px; font-size: 12px;
+        }
+        .chip button { border: none; background: transparent; color: var(--accent);
+            padding: 0 4px; font-size: 13px; cursor: pointer; }
+        .footer { display: flex; justify-content: space-between; align-items: center;
+            padding: 12px 16px; color: var(--muted); font-size: 11px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <img src="../icons/icon.svg" alt="">
+        <div class="grow">
+            <h1>YouTube Channel Blocker &amp; Cleaner</h1>
+            <div class="sub">Manage blocked channels, hidden videos, keywords, and settings</div>
+        </div>
+        <label class="toggle" title="Master switch — turns every feature on or off">
+            <input type="checkbox" id="set-enabled">
+            <span class="t-text"><b>Enabled</b></span>
+        </label>
+    </div>
+
+    <div class="section">
+        <h2>Add a channel to block</h2>
+        <div class="row">
+            <input type="text" id="add-input" class="grow" placeholder="@handle, https://youtube.com/@handle, channel URL, UC… ID, or a channel name">
+            <button class="primary" id="add-btn">Block</button>
+        </div>
+        <div class="muted" style="margin-top:8px;font-size:11px;">
+            Tip: on any YouTube page you can right-click a video and choose <b>Block this YouTube channel</b>.
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Blocked title keywords</h2>
+        <div class="row">
+            <input type="text" id="kw-input" class="grow" placeholder='Hide videos whose title contains… (or /regex/ for patterns)'>
+            <button class="primary" id="kw-btn">Add</button>
+        </div>
+        <div class="chips" id="kw-list"></div>
+    </div>
+
+    <div class="section">
+        <h2>Block lists</h2>
+        <div class="row">
+            <input type="text" id="filter-input" class="grow" placeholder="Search blocked channels / hidden videos…">
+            <button id="rm-selected-btn" class="danger" title="Remove everything ticked below">Remove selected</button>
+        </div>
+    </div>
+    <div class="twocol">
+        <div class="section">
+            <h2>Blocked channels (<span id="ch-count">0</span>)</h2>
+            <div class="list" id="channel-list"></div>
+        </div>
+        <div class="section">
+            <h2>Hidden videos (<span id="vid-count">0</span>)</h2>
+            <div class="list" id="video-list"></div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Settings</h2>
+        <label class="toggle">
+            <input type="checkbox" id="set-shorts">
+            <span class="t-text">Remove Shorts<small>Sidebar entries, channel "Shorts" tab, shelves, and /shorts redirect</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-watched">
+            <span class="t-text">Hide already-watched videos<small>Once the thumbnail progress bar passes the threshold — on the surfaces ticked below</small></span>
+        </label>
+        <div class="subtoggles" id="watched-scopes">
+            <label class="toggle"><input type="checkbox" id="set-w-home"><span class="t-text">Home feed</span></label>
+            <label class="toggle"><input type="checkbox" id="set-w-subs"><span class="t-text">Subscriptions</span></label>
+            <label class="toggle"><input type="checkbox" id="set-w-search"><span class="t-text">Search results</span></label>
+            <label class="toggle"><input type="checkbox" id="set-w-related"><span class="t-text">Related videos</span></label>
+            <label class="toggle"><input type="checkbox" id="set-w-channel"><span class="t-text">Channel pages</span></label>
+            <label class="toggle"><input type="checkbox" id="set-w-playlists"><span class="t-text">Playlists / Watch Later</span></label>
+        </div>
+        <div class="row" style="margin-top:10px;">
+            <span class="grow muted">Watched threshold (%)</span>
+            <input type="number" id="set-threshold" min="1" max="100">
+        </div>
+        <label class="toggle">
+            <input type="checkbox" id="set-flash">
+            <span class="t-text">Reduce flashing<small>Keep watched videos hidden from the start instead of letting them pop in then vanish (handy when sorting oldest-first).</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-reveal">
+            <span class="t-text">Reveal hidden (audit mode)<small>Show everything the extension would hide, dimmed with a red outline, instead of removing it. Turn off for a pure cleaned page.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-blackout">
+            <span class="t-text">Black out blocked channels<small>On a blocked channel's page or video, stop playback and hide the player/thumbnails behind a black panel (recommendations stay) — avoids loading a view.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-quality">
+            <span class="t-text">Auto max quality<small>Set each new video to the highest available resolution when it loads.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-wheelvol">
+            <span class="t-text">In-player volume boost &amp; scroll volume<small>Adds a boost slider (100–500%) next to YouTube's volume control once volume sits at 100%, and lets you scroll over the video to change volume.</small></span>
+        </label>
+    </div>
+
+    <div class="section">
+        <h2>Clean-up extras</h2>
+        <label class="toggle">
+            <input type="checkbox" id="set-promos">
+            <span class="t-text">Hide ads, promos &amp; nudges<small>Ad slots, promoted videos, banners, "new feature" nudges.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-mixes">
+            <span class="t-text">Hide Mixes<small>Auto-generated "Mix" radio tiles in feeds and the sidebar.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-playlists">
+            <span class="t-text">Hide playlist tiles<small>Playlist suggestions in feeds and search (never the playlist page itself or your queue).</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-news">
+            <span class="t-text">Hide news &amp; topic shelves<small>Breaking-news rows and topic sections on Home (always hidden while "Remove Shorts" is on).</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-spinner">
+            <span class="t-text">Hide sidebar loading spinner<small>Hides the spinning circle in the recommendations rail (cosmetic; loading still happens).</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-endscreen">
+            <span class="t-text">Hide end-screen suggestions<small>Removes the grid of suggested videos shown over the player when a video ends, plus pause-screen suggestions.</small></span>
+        </label>
+    </div>
+
+    <div class="section">
+        <h2>Import / Export / Sync</h2>
+        <label class="toggle">
+            <input type="checkbox" id="set-sync">
+            <span class="t-text">Sync block lists via your browser account<small>Channels, videos and keywords follow your browser account (Chrome Sync). Settings stay per-device. <span id="sync-status"></span></small></span>
+        </label>
+        <div class="btn-grid" style="margin-top:8px;">
+            <button id="export-btn">⬇ Export to file</button>
+            <button id="import-btn">⬆ Import from file</button>
+            <button id="copy-btn">⧉ Copy JSON</button>
+            <button id="clear-btn" class="danger">🗑 Clear everything</button>
+        </div>
+        <input type="file" id="import-file" class="hidden-input" accept="application/json,.json">
+        <div class="status" id="status"></div>
+        <div class="muted" style="margin-top:10px;font-size:11px;">
+            Import merges into your current list (no duplicates). Settings are taken from the imported file when present.
+        </div>
+    </div>
+
+    <div class="footer">
+        <a href="onboarding.html" target="_blank" rel="noopener">How to use</a>
+        <a class="kofi" href="https://ko-fi.com/carcer7378" target="_blank" rel="noopener"><span class="heart">♥</span> Support development on Ko-fi</a>
+    </div>
+
+    <script src="common.js"></script>
+    <script src="options.js"></script>
+</body>
+</html>

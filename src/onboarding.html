@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>YouTube Blocker — Getting started</title>
+    <link rel="stylesheet" href="ui.css">
+    <style>
+        body { max-width: 640px; margin: 0 auto; }
+        .step { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+        .step:last-child { border-bottom: none; }
+        .step .num {
+            flex: 0 0 28px; height: 28px; border-radius: 50%;
+            background: var(--accent); color: #fff; font-weight: 700;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .step h3 { margin: 2px 0 4px; font-size: 14px; }
+        .step p { margin: 0; color: var(--muted); }
+        kbd {
+            background: var(--panel-2); border: 1px solid var(--border);
+            border-bottom-width: 2px; border-radius: 4px; padding: 1px 6px;
+            font: 600 11px "Roboto", system-ui, sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <img src="../icons/icon.svg" alt="">
+        <div class="grow">
+            <h1>Welcome to YouTube Channel Blocker &amp; Cleaner</h1>
+            <div class="sub">Everything runs locally in your browser — nothing is collected or sent anywhere.</div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>The essentials</h2>
+
+        <div class="step">
+            <div class="num">1</div>
+            <div>
+                <h3>Block a channel</h3>
+                <p>Right-click any video tile and choose <b>Block this YouTube channel</b> — or open the
+                video's <b>⋮ three-dot menu</b> and pick the injected <b>Block channel</b> item. Every
+                upload from that channel disappears from every page. Misclicked? Hit <b>Undo</b> on the toast.</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="num">2</div>
+            <div>
+                <h3>Hide a single video</h3>
+                <p>Right-click it and choose <b>Hide this video</b>, or <kbd>Ctrl</kbd> + right-click for an
+                instant hide — that also works on end-screen suggestions over the player.</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="num">3</div>
+            <div>
+                <h3>Block by title keywords</h3>
+                <p>In <b>Manage</b> (toolbar button → ⚙), add words or <code>/regex/</code> patterns —
+                any video whose title matches is hidden, whoever uploaded it.</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="num">4</div>
+            <div>
+                <h3>Shorts &amp; watched videos</h3>
+                <p>Shorts (shelves, tabs, the sidebar entry) are removed and /shorts links open in the
+                normal player. Videos you've already watched past a threshold are hidden too — you can
+                choose which surfaces that applies to (Home, Subscriptions, search…).</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="num">5</div>
+            <div>
+                <h3>See what it's doing</h3>
+                <p>Flip on <b>Reveal hidden (audit)</b> in the popup to show everything the extension
+                filtered, dimmed with a red outline, instead of removed. The master <b>On</b> switch in
+                the popup pauses the whole extension instantly.</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="num">6</div>
+            <div>
+                <h3>Take it with you</h3>
+                <p>Export/import your block list as JSON from the popup or Manage page, or enable
+                <b>browser sync</b> (Chrome Sync) so channels, videos and keywords follow your browser account.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="section" style="text-align:center;">
+        <div class="muted" style="margin-bottom:8px;">Enjoying it?</div>
+        <a class="kofi" href="https://ko-fi.com/carcer7378" target="_blank" rel="noopener"><span class="heart">♥</span> Buy me a coffee on Ko-fi</a>
+    </div>
+</body>
+</html>
