@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "YouTube Channel Blocker & Cleaner",
   "version": "3.8.3",
-  "description": "Block whole YouTube channels, hide Shorts, already-watched videos, title keywords and individual tiles. Import/export or sync your block list.",
+  "description": "Block whole YouTube channels, hide Shorts, watched videos, title keywords and individual tiles. Import, export or sync your list.",
 
   "minimum_chrome_version": "111",
 
