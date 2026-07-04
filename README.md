@@ -66,8 +66,14 @@ No build step — this folder is a complete unpacked extension:
 3. Click **Load unpacked** and select this folder.
 4. Open (or reload) any YouTube tab.
 
-To package for the Chrome Web Store, zip the folder contents (PowerShell:
-`Compress-Archive -Path * -DestinationPath ..\youtube-blocker-chromium.zip`).
+To build the store upload package, run `powershell -File build.ps1`. It writes
+`youtube-blocker-chromium-<version>.zip` containing only the extension files
+(`manifest.json`, `icons/`, `src/`, `LICENSE`).
+
+Do **not** package it with `Compress-Archive`: on Windows PowerShell 5.1 that
+cmdlet stores entries with backslash separators (`icons\icon-16.png`), which
+the Chrome / Opera / Edge store validators reject because they can't resolve
+the manifest's `icons/` paths. `build.ps1` writes proper forward-slash entries.
 
 ## Usage
 
