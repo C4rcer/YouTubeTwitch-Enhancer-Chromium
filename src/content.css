@@ -95,22 +95,70 @@ html[data-ytb-reveal] .ytb-removed:hover {
     z-index: 9999998;
     cursor: pointer;
 }
-.ytb-cinema-btn {
-    font-size: 19px;
-    line-height: 1;
+/* Extra player buttons (compressor / A-B loop / screenshot / cinema).
+ * Flat SVG icons on a 24x24 viewBox, scaled to the button box exactly like
+ * YouTube's own; active state tints the icon amber. */
+.ytb-extra-btn {
     vertical-align: top;
+}
+.ytb-extra-btn svg {
+    width: 100%;
+    height: 100%;
+    padding: 8px 12px;
+    box-sizing: border-box;
+    display: block;
+}
+.ytb-extra-btn svg path {
+    opacity: 0.9;
+}
+.ytb-extra-btn.ytb-on svg path {
+    fill: #ffd24d;
+    opacity: 1;
 }
 
-/* Extra player buttons (compressor / A-B loop / screenshot). Emoji glyphs,
- * so the active state is shown with a tinted backdrop rather than color. */
-.ytb-extra-btn {
-    font-size: 16px;
-    line-height: 1;
-    vertical-align: top;
-}
-.ytb-extra-btn.ytb-on {
-    background: rgba(255, 210, 77, 0.28);
+/* Post-skip SponsorBlock notice with the Unskip escape hatch. */
+#ytb-sb-notice {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 61;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px 8px 14px;
     border-radius: 8px;
+    background: rgba(20, 20, 20, 0.9);
+    color: #fff;
+    font: 500 13px/1.2 "Roboto", system-ui, sans-serif;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+}
+#ytb-sb-notice.ytb-show {
+    opacity: 1;
+    pointer-events: auto;
+}
+#ytb-sb-notice button {
+    border: 0;
+    background: none;
+    color: #fff;
+    font: inherit;
+    cursor: pointer;
+    padding: 4px 6px;
+}
+#ytb-sb-notice .ytb-sbn-unskip {
+    color: #3ea6ff;
+    font-weight: 600;
+}
+#ytb-sb-notice .ytb-sbn-unskip:hover {
+    text-decoration: underline;
+}
+#ytb-sb-notice .ytb-sbn-close {
+    opacity: 0.7;
+    font-size: 12px;
+}
+#ytb-sb-notice .ytb-sbn-close:hover {
+    opacity: 1;
 }
 
 /* Return YouTube Dislike count appended to the (icon-only) dislike button.

@@ -1101,14 +1101,66 @@
             if (Date.now() - sbLastSkipAt < 500) return;   // let the seek land
             const t = v.currentTime;
             for (const s of segs) {
+                if (s.noSkip) continue;   // user pressed Unskip on this one
                 if (t >= s.start && t < s.end - 0.3) {
                     sbLastSkipAt = Date.now();
                     try { v.currentTime = s.end; } catch (e) { return; }
-                    showVolumeOverlay('⏭ skipped ' + sbLabel(s.category));
+                    showSbNotice(s, v);
                     break;
                 }
             }
         });
+    }
+
+    // Post-skip notice with an Unskip escape hatch (the ~1s volume-overlay
+    // flash was too easy to miss and offered no way back). Unskip returns
+    // to the start of the segment and stops auto-skipping it for this video.
+    let sbNoticeTimer = null;
+    function showSbNotice(seg, video) {
+        const player = document.getElementById('movie_player');
+        if (!player) return;
+        let el = document.getElementById('ytb-sb-notice');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'ytb-sb-notice';
+            const text = document.createElement('span');
+            text.className = 'ytb-sbn-text';
+            el.appendChild(text);
+            const unskip = document.createElement('button');
+            unskip.className = 'ytb-sbn-unskip';
+            unskip.type = 'button';
+            unskip.textContent = 'Unskip';
+            unskip.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const s = el._seg;
+                if (s) {
+                    s.noSkip = true;
+                    try { if (el._video) el._video.currentTime = Math.max(0, s.start); } catch (err) { /* ignore */ }
+                }
+                el.classList.remove('ytb-show');
+            });
+            el.appendChild(unskip);
+            const close = document.createElement('button');
+            close.className = 'ytb-sbn-close';
+            close.type = 'button';
+            close.title = 'Dismiss';
+            close.textContent = '✕';
+            close.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                el.classList.remove('ytb-show');
+            });
+            el.appendChild(close);
+        }
+        // Re-attach if the player was rebuilt.
+        if (el.parentElement !== player) player.appendChild(el);
+        el.querySelector('.ytb-sbn-text').textContent = '⏭ Skipped ' + sbLabel(seg.category);
+        el._seg = seg;
+        el._video = video;
+        el.classList.add('ytb-show');
+        clearTimeout(sbNoticeTimer);
+        sbNoticeTimer = setTimeout(() => el.classList.remove('ytb-show'), 7000);
     }
 
     function ensureSponsorBlock() {
@@ -2095,15 +2147,15 @@
             return;
         }
         // Desktop player only — the m.youtube.com player has no ytp controls.
-        const controls = document.querySelector('#movie_player .ytp-right-controls');
+        const controls = playerRightControls();
         if (!controls) return;
-        if (existing && controls.contains(existing)) return;
+        if (existing && existing.parentElement === controls) return;
         if (existing) existing.remove();
         const btn = document.createElement('button');
-        btn.className = 'ytp-button ytb-cinema-btn';
+        btn.className = 'ytp-button ytb-extra-btn ytb-cinema-btn';
         btn.dataset.ytbOwner = INSTANCE_ID;
         btn.title = 'Cinema mode — darken everything around the player (Esc to exit)';
-        btn.textContent = '◐';
+        btn.appendChild(ytpIcon(YTB_ICONS.cinema));
         btn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -2212,22 +2264,66 @@
      * Same lifecycle rules as the cinema button (owner-tagged, rebuilt
      * after an in-place update, removed when their toggle is off).
      * ================================================================== */
-    function ensurePlayerButton(cls, want, title, glyph, onClick) {
+    // The 2026 player splits the right controls into -left/-right sections
+    // behind an overflow expander; buttons must live INSIDE a section to
+    // take part in its flex layout (direct children of the old container
+    // overlap the native buttons on narrow players). Older players still
+    // have the flat .ytp-right-controls only.
+    function playerRightControls() {
+        return document.querySelector('#movie_player .ytp-right-controls-left') ||
+               document.querySelector('#movie_player .ytp-right-controls');
+    }
+
+    // Flat white SVG icons matching the native ytp buttons (24x24 viewBox,
+    // scaled by CSS to the button box) — emoji glyphs render as color font
+    // at inconsistent sizes next to YouTube's icons.
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    function ytpIcon(paths) {
+        const svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('fill', 'none');
+        for (const d of paths) {
+            const p = document.createElementNS(SVG_NS, 'path');
+            p.setAttribute('d', d);
+            p.setAttribute('fill', '#fff');
+            p.setAttribute('fill-rule', 'evenodd');
+            p.setAttribute('clip-rule', 'evenodd');
+            svg.appendChild(p);
+        }
+        return svg;
+    }
+
+    const YTB_ICONS = {
+        // camera body + lens ring
+        shot: ['M9.2 4.5 8 6.3H4.9c-1 0-1.9.8-1.9 1.9v9.3c0 1 .8 1.9 1.9 1.9h14.2c1 0 1.9-.8 1.9-1.9V8.2c0-1-.8-1.9-1.9-1.9H16l-1.2-1.8H9.2ZM12 8.9a3.9 3.9 0 1 1 0 7.8 3.9 3.9 0 0 1 0-7.8Zm0 1.7a2.2 2.2 0 1 0 0 4.4 2.2 2.2 0 0 0 0-4.4Z'],
+        // repeat arrows
+        loop: ['M7 7h10v3l4.5-4L17 2v3H5v6.5h2V7Zm10 10H7v-3l-4.5 4L7 22v-3h12v-6.5h-2V17Z'],
+        // mixer: three tracks with fader knobs at different heights
+        comp: ['M6.2 3.5h1.6v17H6.2zM11.2 3.5h1.6v17h-1.6zM16.2 3.5h1.6v17h-1.6z',
+               'M4.5 8h5v3h-5zM9.5 13.5h5v3h-5zM14.5 6h5v3h-5z'],
+        // half-filled circle (cinema)
+        cinema: ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 2a7 7 0 1 1 0 14 7 7 0 0 1 0-14Z',
+                 'M12 5a7 7 0 0 0 0 14V5Z']
+    };
+
+    function ensurePlayerButton(cls, want, title, icon, onClick) {
         let btn = document.querySelector('.' + cls);
         if (btn && btn.dataset.ytbOwner !== INSTANCE_ID) { btn.remove(); btn = null; }
         if (location.pathname !== '/watch' || !want) {
             if (btn) btn.remove();
             return null;
         }
-        const controls = document.querySelector('#movie_player .ytp-right-controls');
+        const controls = playerRightControls();
         if (!controls) return null;
-        if (btn && controls.contains(btn)) return btn;
+        // Re-mount when the player swaps control-bar variants (btn parented
+        // to the old flat container while a sectioned one now exists).
+        if (btn && btn.parentElement === controls) return btn;
         if (btn) btn.remove();
         btn = document.createElement('button');
         btn.className = 'ytp-button ytb-extra-btn ' + cls;
         btn.dataset.ytbOwner = INSTANCE_ID;
         btn.title = title;
-        btn.textContent = glyph;
+        btn.appendChild(ytpIcon(YTB_ICONS[icon]));
         btn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -2327,11 +2423,11 @@
         // Loop dropped on navigation to another video.
         if (loopState.vid && watchVideoId() !== loopState.vid) clearLoop();
         const shot = ensurePlayerButton('ytb-shot-btn', settings.ytShotButton,
-            'Save a screenshot of the current frame (PNG)', '📷', onShotClick);
+            'Save a screenshot of the current frame (PNG)', 'shot', onShotClick);
         const loop = ensurePlayerButton('ytb-loop-btn', settings.ytLoopButton,
-            'A-B loop — 1st click sets the start, 2nd the end (loops), 3rd clears', '🔁', onLoopClick);
+            'A-B loop — 1st click sets the start, 2nd the end (loops), 3rd clears', 'loop', onLoopClick);
         const comp = ensurePlayerButton('ytb-comp-btn', settings.ytCompressorButton,
-            'Audio compressor — evens out quiet dialogue and loud passages', '🎚', onCompClick);
+            'Audio compressor — evens out quiet dialogue and loud passages', 'comp', onCompClick);
         if (comp) comp.classList.toggle('ytb-on', !!settings.ytCompressorOn);
         if (loop) loop.classList.toggle('ytb-on', loopState.mode !== 0);
         void shot;
