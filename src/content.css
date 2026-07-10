@@ -86,6 +86,61 @@ html[data-ytb-reveal] .ytb-removed:hover {
 }
 
 /* ------------------------------------------------------------------
+ * Cinema mode: four dark strips laid around the player's rectangle
+ * (geometry set inline by updateCinema).
+ * ------------------------------------------------------------------ */
+#ytb-dim > div {
+    position: fixed;
+    background: rgba(0, 0, 0, 0.94);
+    z-index: 9999998;
+    cursor: pointer;
+}
+.ytb-cinema-btn {
+    font-size: 19px;
+    line-height: 1;
+    vertical-align: top;
+}
+
+/* Extra player buttons (compressor / A-B loop / screenshot). Emoji glyphs,
+ * so the active state is shown with a tinted backdrop rather than color. */
+.ytb-extra-btn {
+    font-size: 16px;
+    line-height: 1;
+    vertical-align: top;
+}
+.ytb-extra-btn.ytb-on {
+    background: rgba(255, 210, 77, 0.28);
+    border-radius: 8px;
+}
+
+/* Return YouTube Dislike count appended to the (icon-only) dislike button.
+ * The modern dislike button is a fixed-width icon circle, so it has to be
+ * widened for the count to show (verified live 2026-07). */
+button.ytb-ryd-btn {
+    width: auto !important;
+    padding-right: 16px !important;
+}
+.ytb-ryd-count {
+    margin-left: 4px;
+    font-size: 1.4rem;
+    font-weight: 500;
+    line-height: 1;
+}
+
+/* SponsorBlock segment markers on the player progress bar. */
+#ytb-sb-markers {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+#ytb-sb-markers .ytb-sb-marker {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    opacity: 0.7;
+}
+
+/* ------------------------------------------------------------------
  * Toast shown by the content script (e.g. "Blocked channel: …").
  * ------------------------------------------------------------------ */
 #ytb-toast {
@@ -188,10 +243,17 @@ ytd-watch-flexy.ytb-blackout ytd-player {
     display: none !important;
 }
 
+/* m.youtube.com watch page: single column, so hide everything in ytm-watch
+ * except our panel (recommendations live in the same column). */
+ytm-watch.ytb-blackout > *:not(#ytb-blackout-panel) {
+    display: none !important;
+}
+
 /* Channel page: hide everything in the active browse view (header, tabs,
  * content) except our panel. Direct-child hiding is resilient to YouTube's
  * changing header markup; the deeper selectors are belt-and-braces. */
 ytd-browse.ytb-blackout > *:not(#ytb-blackout-panel),
+ytm-browse.ytb-blackout > *:not(#ytb-blackout-panel),
 ytd-browse.ytb-blackout #page-header,
 ytd-browse.ytb-blackout ytd-tabbed-page-header,
 ytd-browse.ytb-blackout ytd-c4-tabbed-header-renderer,

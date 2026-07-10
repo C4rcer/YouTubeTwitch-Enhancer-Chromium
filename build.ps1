@@ -11,7 +11,7 @@
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $version = (Get-Content (Join-Path $root 'manifest.json') -Raw | ConvertFrom-Json).version
-$zipPath = Join-Path $root "youtube-blocker-chromium-$version.zip"
+$zipPath = Join-Path $root "youtube-twitch-enhancer-chromium-$version.zip"
 
 # Only the extension itself ships — never store-assets, README, .git, build.ps1.
 $include = @('manifest.json', 'LICENSE', 'icons', 'src')

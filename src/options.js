@@ -15,6 +15,9 @@
         kwInput: $('kw-input'),
         kwBtn: $('kw-btn'),
         kwList: $('kw-list'),
+        ckwInput: $('ckw-input'),
+        ckwBtn: $('ckw-btn'),
+        ckwList: $('ckw-list'),
         filterInput: $('filter-input'),
         rmSelectedBtn: $('rm-selected-btn'),
         chCount: $('ch-count'),
@@ -34,9 +37,32 @@
         blackout: $('set-blackout'),
         quality: $('set-quality'),
         wheelvol: $('set-wheelvol'),
+        cinema: $('set-cinema'),
+        speed: $('set-speed'),
+        speedkeys: $('set-speedkeys'),
+        speedchan: $('set-speedchan'),
+        comp: $('set-comp'),
+        loop: $('set-loop'),
+        shot: $('set-shot'),
+        nopause: $('set-nopause'),
+        noautoplay: $('set-noautoplay'),
+        expanddesc: $('set-expanddesc'),
+        sb: $('set-sb'),
+        sbSponsor: $('set-sb-sponsor'),
+        sbSelfpromo: $('set-sb-selfpromo'),
+        sbInteraction: $('set-sb-interaction'),
+        sbIntro: $('set-sb-intro'),
+        sbOutro: $('set-sb-outro'),
+        sbPreview: $('set-sb-preview'),
+        sbOfftopic: $('set-sb-offtopic'),
+        sbFiller: $('set-sb-filler'),
+        deTitles: $('set-de-titles'),
+        deThumbs: $('set-de-thumbs'),
+        ryd: $('set-ryd'),
         promos: $('set-promos'),
         mixes: $('set-mixes'),
         playlists: $('set-playlists'),
+        members: $('set-members'),
         news: $('set-news'),
         spinner: $('set-spinner'),
         endscreen: $('set-endscreen'),
@@ -69,6 +95,7 @@
         renderChannels();
         renderVideos();
         renderKeywords();
+        renderCommentKeywords();
         els.enabled.checked = !!data.settings.enabled;
         els.shorts.checked = !!data.settings.blockShorts;
         els.watched.checked = !!data.settings.hideWatched;
@@ -83,9 +110,32 @@
         els.blackout.checked = !!data.settings.blackoutBlockedChannels;
         els.quality.checked = !!data.settings.maxQuality;
         els.wheelvol.checked = !!data.settings.wheelVolume;
+        els.cinema.checked = !!data.settings.ytCinemaButton;
+        els.speed.value = data.settings.ytSpeedDefault;
+        els.speedkeys.checked = !!data.settings.ytSpeedHotkeys;
+        els.speedchan.checked = !!data.settings.ytSpeedPerChannel;
+        els.comp.checked = !!data.settings.ytCompressorButton;
+        els.loop.checked = !!data.settings.ytLoopButton;
+        els.shot.checked = !!data.settings.ytShotButton;
+        els.nopause.checked = !!data.settings.ytNoPauseDialog;
+        els.noautoplay.checked = !!data.settings.ytDisableAutoplay;
+        els.expanddesc.checked = !!data.settings.ytAutoExpandDesc;
+        els.sb.checked = !!data.settings.sbEnabled;
+        els.sbSponsor.checked = !!data.settings.sbSkipSponsor;
+        els.sbSelfpromo.checked = !!data.settings.sbSkipSelfpromo;
+        els.sbInteraction.checked = !!data.settings.sbSkipInteraction;
+        els.sbIntro.checked = !!data.settings.sbSkipIntro;
+        els.sbOutro.checked = !!data.settings.sbSkipOutro;
+        els.sbPreview.checked = !!data.settings.sbSkipPreview;
+        els.sbOfftopic.checked = !!data.settings.sbSkipOfftopic;
+        els.sbFiller.checked = !!data.settings.sbSkipFiller;
+        els.deTitles.checked = !!data.settings.deArrowTitles;
+        els.deThumbs.checked = !!data.settings.deArrowThumbs;
+        els.ryd.checked = !!data.settings.rydEnabled;
         els.promos.checked = !!data.settings.hidePromos;
         els.mixes.checked = !!data.settings.hideMixes;
         els.playlists.checked = !!data.settings.hidePlaylists;
+        els.members.checked = !!data.settings.hideMembersOnly;
         els.news.checked = !!data.settings.hideNewsShelves;
         els.spinner.checked = !!data.settings.hideSidebarSpinner;
         els.endscreen.checked = !!data.settings.hideEndScreen;
@@ -210,13 +260,13 @@
         }
     }
 
-    function renderKeywords() {
-        els.kwList.textContent = '';
-        if (!data.blockedKeywords.length) {
-            els.kwList.appendChild(emptyRow('No keywords yet — videos are never filtered by title.'));
+    function renderChipList(listEl, arr, emptyText, onRemove) {
+        listEl.textContent = '';
+        if (!arr.length) {
+            listEl.appendChild(emptyRow(emptyText));
             return;
         }
-        for (const k of data.blockedKeywords) {
+        for (const k of arr) {
             const chip = document.createElement('span');
             chip.className = 'chip';
             const txt = document.createElement('span');
@@ -224,11 +274,21 @@
             const rm = document.createElement('button');
             rm.title = 'Remove keyword';
             rm.textContent = '✕';
-            rm.addEventListener('click', () => removeKeyword(k));
+            rm.addEventListener('click', () => onRemove(k));
             chip.appendChild(txt);
             chip.appendChild(rm);
-            els.kwList.appendChild(chip);
+            listEl.appendChild(chip);
         }
+    }
+
+    function renderKeywords() {
+        renderChipList(els.kwList, data.blockedKeywords,
+            'No keywords yet — videos are never filtered by title.', removeKeyword);
+    }
+
+    function renderCommentKeywords() {
+        renderChipList(els.ckwList, data.ytCommentKeywords,
+            'No keywords yet — comments are never filtered.', removeCommentKeyword);
     }
 
     function emptyRow(text) {
@@ -265,6 +325,22 @@
         data.blockedKeywords = data.blockedKeywords.filter(x => x !== k);
         await commit();
         status('Removed keyword "' + k + '".');
+    }
+
+    async function addCommentKeyword() {
+        const k = (els.ckwInput.value || '').trim();
+        if (!k) { status('Enter a keyword or /regex/.', true); return; }
+        if (data.ytCommentKeywords.includes(k)) { status('Already in the comment keyword list.', true); return; }
+        data.ytCommentKeywords.push(k);
+        await commit();
+        status('Added comment keyword "' + k + '".');
+        els.ckwInput.value = '';
+    }
+
+    async function removeCommentKeyword(k) {
+        data.ytCommentKeywords = data.ytCommentKeywords.filter(x => x !== k);
+        await commit();
+        status('Removed comment keyword "' + k + '".');
     }
 
     async function removeChannel(c) {
@@ -305,9 +381,32 @@
         data.settings.blackoutBlockedChannels = els.blackout.checked;
         data.settings.maxQuality = els.quality.checked;
         data.settings.wheelVolume = els.wheelvol.checked;
+        data.settings.ytCinemaButton = els.cinema.checked;
+        data.settings.ytSpeedDefault = YTB.clampSpeed(els.speed.value);
+        data.settings.ytSpeedHotkeys = els.speedkeys.checked;
+        data.settings.ytSpeedPerChannel = els.speedchan.checked;
+        data.settings.ytCompressorButton = els.comp.checked;
+        data.settings.ytLoopButton = els.loop.checked;
+        data.settings.ytShotButton = els.shot.checked;
+        data.settings.ytNoPauseDialog = els.nopause.checked;
+        data.settings.ytDisableAutoplay = els.noautoplay.checked;
+        data.settings.ytAutoExpandDesc = els.expanddesc.checked;
+        data.settings.sbEnabled = els.sb.checked;
+        data.settings.sbSkipSponsor = els.sbSponsor.checked;
+        data.settings.sbSkipSelfpromo = els.sbSelfpromo.checked;
+        data.settings.sbSkipInteraction = els.sbInteraction.checked;
+        data.settings.sbSkipIntro = els.sbIntro.checked;
+        data.settings.sbSkipOutro = els.sbOutro.checked;
+        data.settings.sbSkipPreview = els.sbPreview.checked;
+        data.settings.sbSkipOfftopic = els.sbOfftopic.checked;
+        data.settings.sbSkipFiller = els.sbFiller.checked;
+        data.settings.deArrowTitles = els.deTitles.checked;
+        data.settings.deArrowThumbs = els.deThumbs.checked;
+        data.settings.rydEnabled = els.ryd.checked;
         data.settings.hidePromos = els.promos.checked;
         data.settings.hideMixes = els.mixes.checked;
         data.settings.hidePlaylists = els.playlists.checked;
+        data.settings.hideMembersOnly = els.members.checked;
         data.settings.hideNewsShelves = els.news.checked;
         data.settings.hideSidebarSpinner = els.spinner.checked;
         data.settings.hideEndScreen = els.endscreen.checked;
@@ -354,6 +453,7 @@
         data.blockedChannels = [];
         data.hiddenVideoIds = [];
         data.blockedKeywords = [];
+        data.ytCommentKeywords = [];
         await commit();
         status('Cleared the block list.');
     }
@@ -363,6 +463,8 @@
         els.addInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addChannel(); });
         els.kwBtn.addEventListener('click', addKeyword);
         els.kwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addKeyword(); });
+        els.ckwBtn.addEventListener('click', addCommentKeyword);
+        els.ckwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addCommentKeyword(); });
         els.filterInput.addEventListener('input', () => {
             filterText = els.filterInput.value.trim().toLowerCase();
             renderChannels();
@@ -371,11 +473,17 @@
         els.rmSelectedBtn.addEventListener('click', removeSelected);
         [els.enabled, els.shorts, els.watched,
          els.wHome, els.wSubs, els.wSearch, els.wRelated, els.wChannel, els.wPlaylists,
-         els.flash, els.reveal, els.blackout, els.quality, els.wheelvol,
-         els.promos, els.mixes, els.playlists, els.news, els.spinner, els.endscreen,
+         els.flash, els.reveal, els.blackout, els.quality, els.wheelvol, els.cinema,
+         els.speedkeys, els.speedchan, els.comp, els.loop, els.shot,
+         els.nopause, els.noautoplay, els.expanddesc,
+         els.sb, els.sbSponsor, els.sbSelfpromo, els.sbInteraction, els.sbIntro,
+         els.sbOutro, els.sbPreview, els.sbOfftopic, els.sbFiller,
+         els.deTitles, els.deThumbs, els.ryd,
+         els.promos, els.mixes, els.playlists, els.members, els.news, els.spinner, els.endscreen,
          els.sync
         ].forEach(c => c.addEventListener('change', saveSettings));
         els.threshold.addEventListener('change', saveSettings);
+        els.speed.addEventListener('change', saveSettings);
         els.exportBtn.addEventListener('click', doExport);
         els.importBtn.addEventListener('click', () => els.importFile.click());
         els.importFile.addEventListener('change', (e) => { if (e.target.files[0]) doImport(e.target.files[0]); e.target.value = ''; });

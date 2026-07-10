@@ -3,68 +3,162 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>YouTube Blocker</title>
+    <title>YouTube/Twitch Enhancer</title>
     <link rel="stylesheet" href="ui.css">
-    <style>body { width: 340px; }</style>
+    <!-- Fixed width sizes the desktop popup; cap at the viewport and
+         center in case a browser renders it full-width. -->
+    <style>body { width: 340px; max-width: 100%; margin: 0 auto; }</style>
 </head>
 <body>
     <div class="header">
         <img src="../icons/icon.svg" alt="">
         <div class="grow">
-            <h1>YouTube Blocker</h1>
-            <div class="sub">Channel blocking &amp; cleanup</div>
+            <h1>YouTube/Twitch Enhancer</h1>
+            <div class="sub">Blocking &amp; cleanup for both sites</div>
         </div>
-        <label class="toggle" title="Master switch — turns every feature on or off">
-            <input type="checkbox" id="set-enabled">
-            <span class="t-text"><b>On</b></span>
-        </label>
-    </div>
-
-    <div class="section">
-        <div class="row spread">
-            <span class="pill"><span class="n" id="count-channels">0</span> channels</span>
-            <span class="pill"><span class="n" id="count-videos">0</span> videos</span>
-        </div>
-        <div class="row" style="margin-top:12px;">
-            <input type="text" id="add-input" class="grow" placeholder="@handle, channel URL, or name">
-            <button class="primary" id="add-btn">Block</button>
+        <div class="site-tabs" role="tablist">
+            <button id="tab-youtube" class="site-tab" role="tab">YouTube</button>
+            <button id="tab-twitch" class="site-tab" role="tab">Twitch</button>
         </div>
     </div>
 
-    <div class="section">
-        <h2>Settings</h2>
-        <label class="toggle">
-            <input type="checkbox" id="set-shorts">
-            <span class="t-text">Remove Shorts<small>Sidebar, tabs, shelves, /shorts redirect</small></span>
-        </label>
-        <label class="toggle">
-            <input type="checkbox" id="set-watched">
-            <span class="t-text">Hide watched videos<small>Past the threshold below</small></span>
-        </label>
-        <label class="toggle">
-            <input type="checkbox" id="set-reveal">
-            <span class="t-text">Reveal hidden (audit)<small>Show hidden tiles dimmed instead of removed</small></span>
-        </label>
-        <label class="toggle">
-            <input type="checkbox" id="set-wheelvol">
-            <span class="t-text">In-player volume boost<small>Boost slider next to YouTube's volume control + scroll-over-player volume</small></span>
-        </label>
-        <div class="row" style="margin-top:8px;">
-            <span class="grow muted">Watched threshold</span>
-            <input type="number" id="set-threshold" min="1" max="100"> <span class="muted">%</span>
+    <!-- ============================ YouTube ============================ -->
+    <div id="panel-youtube">
+        <div class="section">
+            <label class="toggle" title="Master switch for every YouTube feature">
+                <input type="checkbox" id="set-enabled">
+                <span class="t-text"><b>YouTube features on</b></span>
+            </label>
+            <div class="row spread" style="margin-top:8px;">
+                <span class="pill"><span class="n" id="count-channels">0</span> channels</span>
+                <span class="pill"><span class="n" id="count-videos">0</span> videos</span>
+            </div>
+            <div class="row" style="margin-top:12px;">
+                <input type="text" id="add-input" class="grow" placeholder="@handle, channel URL, or name">
+                <button class="primary" id="add-btn">Block</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Settings</h2>
+            <label class="toggle">
+                <input type="checkbox" id="set-shorts">
+                <span class="t-text">Remove Shorts<small>Sidebar, tabs, shelves, /shorts redirect</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="set-watched">
+                <span class="t-text">Hide watched videos<small>Past the threshold below</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="set-members">
+                <span class="t-text">Hide members-only videos<small>Leave off if you're a member of some channels</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="set-reveal">
+                <span class="t-text">Reveal hidden (audit)<small>Show hidden tiles dimmed instead of removed</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="set-wheelvol">
+                <span class="t-text">In-player volume boost<small>Boost slider next to YouTube's volume control + scroll-over-player volume</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="set-cinema">
+                <span class="t-text">Cinema mode button<small>◐ in the player controls darkens everything around the video</small></span>
+            </label>
+            <div class="row" style="margin-top:8px;">
+                <span class="grow muted">Watched threshold</span>
+                <input type="number" id="set-threshold" min="1" max="100"> <span class="muted">%</span>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Block list</h2>
+            <div class="btn-grid">
+                <button id="export-btn">⬇ Export</button>
+                <button id="import-btn">⬆ Import</button>
+                <button id="copy-btn">⧉ Copy JSON</button>
+                <button id="options-btn" title="Full manager: block lists, keywords, player tools and every setting">⚙ Advanced…</button>
+            </div>
+            <input type="file" id="import-file" class="hidden-input" accept="application/json,.json">
+            <div class="status" id="status"></div>
         </div>
     </div>
 
-    <div class="section">
-        <h2>Block list</h2>
-        <div class="btn-grid">
-            <button id="export-btn">⬇ Export</button>
-            <button id="import-btn">⬆ Import</button>
-            <button id="copy-btn">⧉ Copy JSON</button>
-            <button id="options-btn">⚙ Manage all…</button>
+    <!-- ============================ Twitch ============================ -->
+    <div id="panel-twitch" class="hidden">
+        <div class="section">
+            <label class="toggle" title="Master switch for every Twitch feature">
+                <input type="checkbox" id="tw-enabled">
+                <span class="t-text"><b>Twitch features on</b></span>
+            </label>
+            <div class="row spread" style="margin-top:8px;">
+                <span class="pill"><span class="n" id="tw-count-channels">0</span> channels</span>
+                <span class="pill"><span class="n" id="tw-count-categories">0</span> categories</span>
+            </div>
+            <div class="row" style="margin-top:12px;">
+                <input type="text" id="tw-add-input" class="grow" placeholder="channel, category, or twitch.tv URL">
+            </div>
+            <div class="row">
+                <button class="primary grow" id="tw-add-channel-btn">Block channel</button>
+                <button class="grow" id="tw-add-category-btn">Block category</button>
+            </div>
         </div>
-        <input type="file" id="import-file" class="hidden-input" accept="application/json,.json">
-        <div class="status" id="status"></div>
+
+        <div class="section">
+            <h2>Settings</h2>
+            <label class="toggle">
+                <input type="checkbox" id="tw-autoclaim">
+                <span class="t-text">Auto-claim channel points<small>Clicks the bonus chest for you, even in background tabs</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="tw-drops">
+                <span class="t-text">Auto-claim drops<small>Claims earned drops from the callout and the inventory page</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="tw-moments">
+                <span class="t-text">Auto-claim Moments<small>Grabs Moment badges when they appear in chat</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="tw-anon">
+                <span class="t-text">Anonymous chat<small>You never appear in viewer lists; chat becomes read-only. Takes effect on reload</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="tw-emotes">
+                <span class="t-text">Third-party emotes<small>Shows BTTV, FFZ and 7TV emotes in chat (fetched from those services)</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="tw-cinema">
+                <span class="t-text">Cinema mode button<small>◐ on the player darkens everything around the stream</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="tw-carousel">
+                <span class="t-text">Hide front-page carousel<small>Removes and pauses the auto-playing stream up top</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="tw-hidechat">
+                <span class="t-text">Hide chat<small>Visually only — points still accrue and auto-claim keeps working</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="tw-cliphelper">
+                <span class="t-text">Clip helper<small>➤ Share clip button: sends your latest clip to chat (use Twitch's own Clip button to create one)</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="tw-maxquality">
+                <span class="t-text">Pin source quality<small>New streams start at the highest quality instead of Auto</small></span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="tw-hideext">
+                <span class="t-text">Hide extension overlays<small>Removes extension panels and the dock from the player</small></span>
+            </label>
+        </div>
+
+        <div class="section">
+            <h2>Block lists</h2>
+            <div class="btn-grid">
+                <button id="tw-options-btn" style="grid-column:1/-1;" title="Full Twitch manager: block lists, tags, chat filters, player tools and every setting">⚙ Twitch advanced…</button>
+            </div>
+            <div class="status" id="tw-status"></div>
+        </div>
     </div>
 
     <div class="section" style="text-align:center;">

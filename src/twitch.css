@@ -1,0 +1,295 @@
+/* ------------------------------------------------------------------
+ * Twitch content styles.
+ * Cards hidden by the block lists. Hiding (not removing) keeps
+ * Twitch's React tree happy, same reasoning as on the YouTube side.
+ * ------------------------------------------------------------------ */
+.ytbtw-removed {
+    display: none !important;
+}
+
+/* ------------------------------------------------------------------
+ * Clip helper bar: small pill overlaid in the player's top-right,
+ * kept out of the way of Twitch's own top-left stream info.
+ * ------------------------------------------------------------------ */
+#ytbtw-clipbar {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 40;
+    display: flex;
+    gap: 6px;
+    opacity: 0.35;
+    transition: opacity 0.15s ease;
+}
+#ytbtw-clipbar:hover {
+    opacity: 1;
+}
+#ytbtw-clipbar button {
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 999px;
+    padding: 5px 12px;
+    font: 600 12px/1.2 "Inter", "Roobert", system-ui, sans-serif;
+    cursor: pointer;
+    white-space: nowrap;
+}
+#ytbtw-clipbar button:hover {
+    background: #9147ff;
+    border-color: #9147ff;
+}
+
+/* ------------------------------------------------------------------
+ * Third-party emotes (BTTV / FFZ / 7TV), sized to match Twitch's own
+ * 28px chat emotes.
+ * ------------------------------------------------------------------ */
+.ytbtw-emote {
+    height: 28px;
+    width: auto;
+    max-width: 112px;
+    vertical-align: middle;
+    margin: -6px 2px;
+}
+
+/* Chat performance: lines held back for batched reveal, and lines past
+ * the configured limit. Hidden, not removed — React owns these nodes. */
+.ytbtw-chat-pending,
+.ytbtw-chat-trimmed {
+    display: none !important;
+}
+
+/* Chat filters: blocked words/users vanish; highlight keywords get a
+ * tinted background with an accent bar. */
+.ytbtw-chat-blocked {
+    display: none !important;
+}
+.ytbtw-chat-highlight {
+    background: rgba(145, 71, 255, 0.18) !important;
+    box-shadow: inset 3px 0 0 #9147ff;
+}
+
+/* Show-deleted: the original text re-attached after Twitch's
+ * "message deleted" notice. */
+.ytbtw-deleted-restored {
+    opacity: 0.65;
+    text-decoration: line-through;
+}
+
+/* Compressor button active state on the clip bar. */
+#ytbtw-clipbar button.ytbtw-active {
+    background: #9147ff;
+    border-color: #9147ff;
+}
+
+/* Stream uptime chip next to the viewer count. */
+#ytbtw-uptime {
+    margin-left: 10px;
+    color: #bf94ff;
+    font: 600 13px/1.2 "Inter", "Roobert", system-ui, sans-serif;
+    white-space: nowrap;
+}
+
+/* Sidebar hover preview: floats beside the side nav; pointer-events off so
+ * it can never steal the hover it depends on. */
+#ytbtw-preview {
+    position: fixed;
+    z-index: 9999999;
+    width: 320px;
+    pointer-events: none;
+    background: #1f1f23;
+    border: 1px solid #3a3a3d;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+#ytbtw-preview img {
+    display: block;
+    width: 100%;
+    height: auto;
+}
+#ytbtw-preview .ytbtw-preview-cap {
+    padding: 6px 10px;
+    color: #efeff1;
+    font: 600 12px/1.2 "Inter", "Roobert", system-ui, sans-serif;
+}
+
+/* ------------------------------------------------------------------
+ * Cinema mode: four dark strips laid around the player's rectangle
+ * (geometry set inline by updateCinema). Strips instead of one overlay
+ * because Twitch's .persistent-player creates a stacking context the
+ * player could never be raised out of.
+ * ------------------------------------------------------------------ */
+#ytbtw-dim > div {
+    position: fixed;
+    background: rgba(0, 0, 0, 0.94);
+    z-index: 9999998;
+    cursor: pointer;
+}
+
+/* ------------------------------------------------------------------
+ * Inline volume-boost slider: sits right after Twitch's volume control.
+ * Only visible while native volume is at 100%; extends it 100–500%.
+ * ------------------------------------------------------------------ */
+#ytbtw-boost {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 6px;
+}
+#ytbtw-boost.ytbtw-hide {
+    display: none;
+}
+#ytbtw-boost input[type="range"] {
+    width: 72px;
+    margin: 0;
+    cursor: pointer;
+    accent-color: #ffd24d;
+}
+#ytbtw-boost .ytbtw-boost-label {
+    min-width: 38px;
+    color: #efeff1;
+    font: 600 12px/1 "Inter", "Roobert", system-ui, sans-serif;
+    cursor: pointer;
+    user-select: none;
+}
+#ytbtw-boost.ytbtw-boosting .ytbtw-boost-label {
+    color: #ffd24d;
+}
+
+/* ------------------------------------------------------------------
+ * Third-party emote picker: button beside Twitch's emote button and
+ * the searchable panel above the chat input.
+ * ------------------------------------------------------------------ */
+#ytbtw-picker-btn {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 6px;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    vertical-align: middle;
+}
+#ytbtw-picker-btn:hover {
+    background: rgba(145, 71, 255, 0.25);
+}
+#ytbtw-picker-panel {
+    position: fixed;
+    width: 320px;
+    max-height: 420px;
+    display: flex;
+    flex-direction: column;
+    z-index: 9999999;
+    background: #1f1f23;
+    border: 1px solid #3a3a3d;
+    border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+    padding: 8px;
+    gap: 8px;
+}
+#ytbtw-picker-panel input {
+    background: #0e0e10;
+    border: 1px solid #3a3a3d;
+    color: #efeff1;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font: 400 13px/1.3 "Inter", "Roobert", system-ui, sans-serif;
+    width: 100%;
+    box-sizing: border-box;
+}
+#ytbtw-picker-panel input:focus { outline: none; border-color: #9147ff; }
+#ytbtw-picker-panel .ytbtw-picker-grid {
+    overflow-y: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-content: flex-start;
+}
+#ytbtw-picker-panel .ytbtw-picker-head {
+    flex-basis: 100%;
+    color: #adadb8;
+    font: 600 11px/1.4 "Inter", "Roobert", system-ui, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 6px 2px 2px;
+}
+#ytbtw-picker-panel .ytbtw-picker-grid button {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 3px;
+    cursor: pointer;
+    line-height: 0;
+}
+#ytbtw-picker-panel .ytbtw-picker-grid button:hover {
+    background: rgba(145, 71, 255, 0.3);
+}
+#ytbtw-picker-panel .ytbtw-picker-grid img {
+    height: 28px;
+    width: auto;
+    max-width: 84px;
+}
+
+/* ------------------------------------------------------------------
+ * Clip download button (clip pages only).
+ * ------------------------------------------------------------------ */
+#ytbtw-clipdl {
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    z-index: 999999;
+    background: #9147ff;
+    color: #fff;
+    border: none;
+    border-radius: 999px;
+    padding: 9px 16px;
+    font: 600 13px/1.2 "Inter", "Roobert", system-ui, sans-serif;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+#ytbtw-clipdl:hover { background: #a970ff; }
+#ytbtw-clipdl:disabled { opacity: 0.7; cursor: default; }
+
+/* ------------------------------------------------------------------
+ * Toast (mirrors the YouTube one).
+ * ------------------------------------------------------------------ */
+#ytbtw-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 84px;
+    transform: translateX(-50%) translateY(12px);
+    z-index: 2147483647;
+    max-width: 380px;
+    padding: 10px 16px;
+    border-radius: 8px;
+    background: #1f1f23;
+    color: #fff;
+    font: 500 13px/1.4 "Inter", "Roobert", system-ui, sans-serif;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+    border: 1px solid #3a3a3d;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease, transform 0.18s ease;
+}
+#ytbtw-toast.ytbtw-show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+#ytbtw-toast .ytbtw-toast-accent {
+    color: #bf94ff;
+}
+#ytbtw-toast .ytbtw-undo {
+    pointer-events: auto;
+    margin-left: 12px;
+    padding: 3px 12px;
+    background: transparent;
+    color: #bf94ff;
+    border: 1px solid #bf94ff;
+    border-radius: 6px;
+    font: 600 12px/1.3 "Inter", "Roobert", system-ui, sans-serif;
+    cursor: pointer;
+    vertical-align: middle;
+}
+#ytbtw-toast .ytbtw-undo:hover {
+    background: rgba(145, 71, 255, 0.2);
+}

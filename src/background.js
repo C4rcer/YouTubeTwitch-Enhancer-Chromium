@@ -1,13 +1,12 @@
 /* ==================================================================
- * Background script.
+ * Background script (runs as the MV3 service worker on Chromium; pulled
+ * in by background-sw.js together with common.js).
  *   - Registers right-click menu entries on YouTube and relays clicks
  *     to the content script of the active tab.
  *   - Opens the onboarding page on first install.
- *   - Mirrors the block lists to storage.sync (Firefox Sync) when the
- *     "syncBlockLists" setting is on. storage.local stays the source
- *     of truth; sync is a chunked JSON mirror (8KB/item quota).
- *
- * Loaded together with common.js (YTB helpers) — see manifest.json.
+ *   - Mirrors the block lists to storage.sync (the browser's own sync)
+ *     when the "syncBlockLists" setting is on. storage.local stays the
+ *     source of truth; sync is a chunked JSON mirror (8KB/item quota).
  * ================================================================== */
 /* global YTB */
 (function () {
@@ -15,9 +14,12 @@
 
     const api = (typeof browser !== 'undefined') ? browser : chrome;
     const YT_PATTERNS = ['*://www.youtube.com/*'];
+    const TW_PATTERNS = ['*://www.twitch.tv/*'];
+    const HAS_MENUS = !!api.contextMenus;
 
     /* ---------------- context menus ---------------- */
     function buildMenus() {
+        if (!HAS_MENUS) return;
         api.contextMenus.removeAll(() => {
             api.contextMenus.create({
                 id: 'ytb-block-channel',
@@ -39,9 +41,33 @@
             });
             api.contextMenus.create({
                 id: 'ytb-open-options',
-                title: 'Manage block list…',
+                title: 'Advanced settings…',
                 contexts: ['all'],
                 documentUrlPatterns: YT_PATTERNS
+            });
+            api.contextMenus.create({
+                id: 'ytbtw-block-channel',
+                title: 'Block this Twitch channel',
+                contexts: ['all'],
+                documentUrlPatterns: TW_PATTERNS
+            });
+            api.contextMenus.create({
+                id: 'ytbtw-block-category',
+                title: 'Block this Twitch category',
+                contexts: ['all'],
+                documentUrlPatterns: TW_PATTERNS
+            });
+            api.contextMenus.create({
+                id: 'ytbtw-sep',
+                type: 'separator',
+                contexts: ['all'],
+                documentUrlPatterns: TW_PATTERNS
+            });
+            api.contextMenus.create({
+                id: 'ytbtw-open-options',
+                title: 'Twitch advanced settings…',
+                contexts: ['all'],
+                documentUrlPatterns: TW_PATTERNS
             });
         });
     }
@@ -54,17 +80,184 @@
     });
     api.runtime.onStartup.addListener(buildMenus);
 
-    api.contextMenus.onClicked.addListener((info, tab) => {
-        if (info.menuItemId === 'ytb-open-options') {
-            api.runtime.openOptionsPage();
-            return;
+    /* ---------------- Community data proxies (opt-in features) ----------
+     * SponsorBlock / DeArrow / Return YouTube Dislike lookups run here in
+     * the background so the page CSP never interferes and no extra host
+     * permissions are needed (all three APIs answer with open CORS).
+     *   - SponsorBlock & DeArrow data: CC BY-NC-SA 4.0, by Ajay Ramachandran
+     *     (https://sponsor.ajay.app). Lookups use the k-anonymity endpoints:
+     *     only a 4-character sha256 prefix of the video ID leaves the browser.
+     *   - Return YouTube Dislike (https://returnyoutubedislike.com): free
+     *     with attribution; limits 100 req/min & 10k/day, far above what a
+     *     per-watch-page cache can generate.
+     * ------------------------------------------------------------------ */
+    const SB_API = 'https://sponsor.ajay.app';
+    const RYD_API = 'https://returnyoutubedislikeapi.com';
+    const commCache = new Map();          // key -> { at, value }
+    const COMM_TTL = 10 * 60 * 1000;
+    const COMM_MAX = 600;
+    const commFailAt = { sb: 0, de: 0, ryd: 0 };
+
+    function commGet(key) {
+        const hit = commCache.get(key);
+        return (hit && Date.now() - hit.at < COMM_TTL) ? hit.value : undefined;
+    }
+
+    function commSet(key, value) {
+        if (commCache.size >= COMM_MAX) commCache.delete(commCache.keys().next().value);
+        commCache.set(key, { at: Date.now(), value });
+        return value;
+    }
+
+    async function sha256Prefix(str, len) {
+        const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+        return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, len);
+    }
+
+    async function sbSegments(videoId, categories) {
+        const key = 'sb:' + videoId + ':' + categories.join(',');
+        const cached = commGet(key);
+        if (cached !== undefined) return cached;
+        if (Date.now() - commFailAt.sb < 60000) return null;
+        try {
+            const prefix = await sha256Prefix(videoId, 4);
+            const r = await fetch(SB_API + '/api/skipSegments/' + prefix +
+                '?categories=' + encodeURIComponent(JSON.stringify(categories)));
+            if (r.status === 404) return commSet(key, []);
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const arr = await r.json();
+            const mine = ((arr || []).find(v => v.videoID === videoId) || {}).segments || [];
+            return commSet(key, mine
+                .filter(s => !s.actionType || s.actionType === 'skip')
+                .filter(s => s.locked || s.votes == null || s.votes >= 0)
+                .map(s => ({ category: s.category, start: s.segment[0], end: s.segment[1] })));
+        } catch (e) {
+            commFailAt.sb = Date.now();
+            return null;
         }
-        if (tab && tab.id != null) {
-            api.tabs.sendMessage(tab.id, { action: info.menuItemId }).catch(() => {});
+    }
+
+    async function deBranding(videoId) {
+        const key = 'de:' + videoId;
+        const cached = commGet(key);
+        if (cached !== undefined) return cached;
+        if (Date.now() - commFailAt.de < 60000) return null;
+        try {
+            const prefix = await sha256Prefix(videoId, 4);
+            const r = await fetch(SB_API + '/api/branding/' + prefix);
+            if (r.status === 404) return commSet(key, {});
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const map = await r.json();
+            const mine = map && map[videoId];
+            if (!mine) return commSet(key, {});
+            const t = (mine.titles || []).find(x => !x.original && (x.locked || x.votes >= 0));
+            const th = (mine.thumbnails || []).find(x => !x.original && (x.locked || x.votes >= 0));
+            return commSet(key, {
+                // ">" prefixes a word to opt it out of DeArrow's auto-formatting.
+                title: t ? t.title.replace(/(^|\s)>(\S)/g, '$1$2') : null,
+                thumbTime: (th && th.timestamp != null) ? th.timestamp : null
+            });
+        } catch (e) {
+            commFailAt.de = Date.now();
+            return null;
+        }
+    }
+
+    async function rydVotes(videoId) {
+        const key = 'ryd:' + videoId;
+        const cached = commGet(key);
+        if (cached !== undefined) return cached;
+        if (Date.now() - commFailAt.ryd < 60000) return null;
+        try {
+            const r = await fetch(RYD_API + '/votes?videoId=' + encodeURIComponent(videoId));
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const d = await r.json();
+            return commSet(key, { likes: d.likes, dislikes: d.dislikes });
+        } catch (e) {
+            commFailAt.ryd = Date.now();
+            return null;
+        }
+    }
+
+    // Emote-list fetches for the Twitch content script. Chromium content
+    // scripts fetch under the page's CORS/CSP rules, so the lookups run
+    // here, where the manifest's host permissions apply. Fixed allowlist —
+    // never an open proxy.
+    const FETCH_ALLOW = [
+        'https://api.betterttv.net/',
+        'https://api.frankerfacez.com/',
+        'https://7tv.io/'
+    ];
+    async function fetchJsonForContent(url) {
+        if (typeof url !== 'string' || !FETCH_ALLOW.some(p => url.startsWith(p))) {
+            return { ok: false, error: 'blocked url' };
+        }
+        try {
+            const r = await fetch(url);
+            if (!r.ok) return { ok: false, error: 'HTTP ' + r.status };
+            return { ok: true, data: await r.json() };
+        } catch (e) {
+            return { ok: false, error: String(e && e.message || e) };
+        }
+    }
+
+    // Messages from the content scripts (they can't open extension pages,
+    // manage tabs, or make CSP-free cross-origin fetches themselves).
+    // Chromium ignores a Promise returned from onMessage, so async replies
+    // go through sendResponse + `return true` instead.
+    let dropClaimTabAt = 0;
+    api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+        if (!msg || !msg.action) return;
+        let reply = null;
+        if (msg.action === 'ytb-sb-segments') {
+            reply = sbSegments(String(msg.videoId || ''), Array.isArray(msg.categories) && msg.categories.length ? msg.categories : ['sponsor']);
+        } else if (msg.action === 'ytb-de-branding') {
+            reply = deBranding(String(msg.videoId || ''));
+        } else if (msg.action === 'ytb-ryd-votes') {
+            reply = rydVotes(String(msg.videoId || ''));
+        } else if (msg.action === 'ytb-fetch-json') {
+            reply = fetchJsonForContent(msg.url);
+        } else if (msg.action === 'ytbtw-open-options') {
+            api.tabs.create({ url: api.runtime.getURL('src/twitch-options.html') }).catch(() => {});
+        } else if (msg.action === 'ytbtw-claim-drops') {
+            // Open the drops inventory in a background (inactive) tab so the
+            // stream the user is watching is never disturbed. That tab's own
+            // content script claims and then asks to be closed. Guard against
+            // opening more than one within a short window.
+            if (Date.now() - dropClaimTabAt < 60000) return;
+            dropClaimTabAt = Date.now();
+            api.tabs.create({
+                url: 'https://www.twitch.tv/drops/inventory#ytbtw-autoclaim',
+                active: false
+            }).catch(() => {});
+        } else if (msg.action === 'ytbtw-close-self') {
+            if (sender && sender.tab && sender.tab.id != null) {
+                api.tabs.remove(sender.tab.id).catch(() => {});
+            }
+        }
+        if (reply) {
+            reply.then(sendResponse, () => sendResponse(null));
+            return true;   // keep the channel open for the async reply
         }
     });
 
-    /* ---------------- Firefox Sync mirror ----------------
+    if (HAS_MENUS) {
+        api.contextMenus.onClicked.addListener((info, tab) => {
+            if (info.menuItemId === 'ytb-open-options') {
+                api.runtime.openOptionsPage();
+                return;
+            }
+            if (info.menuItemId === 'ytbtw-open-options') {
+                api.tabs.create({ url: api.runtime.getURL('src/twitch-options.html') }).catch(() => {});
+                return;
+            }
+            if (tab && tab.id != null) {
+                api.tabs.sendMessage(tab.id, { action: info.menuItemId }).catch(() => {});
+            }
+        });
+    }
+
+    /* ---------------- browser-sync mirror ----------------
      * Layout in storage.sync:
      *   ytbSyncMeta            { chunks, updatedAt }
      *   ytbSyncChunk0..N       slices of the lists JSON
@@ -79,13 +272,23 @@
     let pushTimer = null;
     let applyTimer = null;
 
+    // Keyword-style lists mirrored verbatim (union on merge). Channel /
+    // category lists need identity-aware merging and stay explicit below.
+    const SIMPLE_LIST_FIELDS = [
+        'hiddenVideoIds', 'blockedKeywords', 'twitchBlockedKeywords',
+        'twitchBlockedTags', 'twitchHighlightKeywords',
+        'twitchChatBlockKeywords', 'twitchChatBlockUsers', 'ytCommentKeywords'
+    ];
+
     function listsOf(data) {
         const d = YTB.normalize(data);
-        return JSON.stringify({
-            hiddenVideoIds: d.hiddenVideoIds,
+        const out = {
             blockedChannels: d.blockedChannels,
-            blockedKeywords: d.blockedKeywords
-        });
+            twitchBlockedChannels: d.twitchBlockedChannels,
+            twitchBlockedCategories: d.twitchBlockedCategories
+        };
+        for (const f of SIMPLE_LIST_FIELDS) out[f] = d[f];
+        return JSON.stringify(out);
     }
 
     async function getLocal() {
@@ -142,17 +345,26 @@
         const merged = YTB.normalize(local);
         if (remote && remote.lists) {
             const inc = YTB.normalize(remote.lists);
-            const vids = new Set(merged.hiddenVideoIds);
-            inc.hiddenVideoIds.forEach(v => vids.add(v));
-            merged.hiddenVideoIds = [...vids];
             for (const c of inc.blockedChannels) {
                 if (!merged.blockedChannels.some(x => YTB.sameChannel(x, c))) {
                     merged.blockedChannels.push(c);
                 }
             }
-            const kws = new Set(merged.blockedKeywords);
-            inc.blockedKeywords.forEach(k => kws.add(k));
-            merged.blockedKeywords = [...kws];
+            for (const c of inc.twitchBlockedChannels) {
+                if (!merged.twitchBlockedChannels.some(x => YTB.sameTwitchChannel(x, c))) {
+                    merged.twitchBlockedChannels.push(c);
+                }
+            }
+            for (const c of inc.twitchBlockedCategories) {
+                if (!merged.twitchBlockedCategories.some(x => YTB.sameTwitchCategory(x, c))) {
+                    merged.twitchBlockedCategories.push(c);
+                }
+            }
+            for (const f of SIMPLE_LIST_FIELDS) {
+                const set = new Set(merged[f]);
+                inc[f].forEach(k => set.add(k));
+                merged[f] = [...set];
+            }
         }
         const str = listsOf(merged);
         if (str !== listsOf(local)) {
@@ -171,9 +383,10 @@
         if (remote.str === listsOf(local)) return;       // already identical
         const next = YTB.normalize(local);
         const inc = YTB.normalize(remote.lists);
-        next.hiddenVideoIds = inc.hiddenVideoIds;
         next.blockedChannels = inc.blockedChannels;
-        next.blockedKeywords = inc.blockedKeywords;
+        next.twitchBlockedChannels = inc.twitchBlockedChannels;
+        next.twitchBlockedCategories = inc.twitchBlockedCategories;
+        for (const f of SIMPLE_LIST_FIELDS) next[f] = inc[f];
         lastAppliedStr = listsOf(next);
         await api.storage.local.set({ data: next });
         await setSyncStatus({ ok: true, at: Date.now() });

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "YouTube Channel Blocker & Cleaner",
-  "version": "3.8.3",
-  "description": "Block whole YouTube channels, hide Shorts, watched videos, title keywords and individual tiles. Import, export or sync your list.",
+  "name": "YouTube/Twitch Enhancer",
+  "version": "4.3.0",
+  "description": "Block channels, categories & keywords on YouTube & Twitch. Hide Shorts & watched videos, auto-claim points & drops, player tools.",
 
   "minimum_chrome_version": "111",
 
@@ -19,7 +19,12 @@
   ],
 
   "host_permissions": [
-    "*://www.youtube.com/*"
+    "*://www.youtube.com/*",
+    "*://www.twitch.tv/*",
+    "*://clips.twitch.tv/*",
+    "*://api.betterttv.net/*",
+    "*://api.frankerfacez.com/*",
+    "*://7tv.io/*"
   ],
 
   "content_scripts": [
@@ -36,6 +41,20 @@
       "run_at": "document_start",
       "all_frames": false,
       "world": "MAIN"
+    },
+    {
+      "matches": ["*://www.twitch.tv/*", "*://clips.twitch.tv/*"],
+      "js": ["src/twitch.js"],
+      "css": ["src/twitch.css"],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": ["*://www.twitch.tv/*"],
+      "js": ["src/page-twitch.js"],
+      "run_at": "document_start",
+      "all_frames": false,
+      "world": "MAIN"
     }
   ],
 
@@ -44,7 +63,7 @@
   },
 
   "action": {
-    "default_title": "YouTube Blocker",
+    "default_title": "YouTube/Twitch Enhancer",
     "default_popup": "src/popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",

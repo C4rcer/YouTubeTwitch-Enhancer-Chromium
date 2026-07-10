@@ -1,74 +1,160 @@
-# YouTube Channel Blocker & Cleaner (Chromium)
+# YouTube/Twitch Enhancer (Chromium)
 
-Take back your YouTube feed. Block whole channels, hide videos by title keyword,
-remove Shorts, hide what you've already watched, and strip the clutter — all
-locally in your browser, with nothing collected or sent anywhere.
+Take back your YouTube and Twitch feeds. Block whole channels and categories,
+hide videos by title keyword, remove Shorts, hide what you've already watched,
+auto-claim Twitch points and drops, and strip the clutter: all locally in your
+browser, with nothing collected or sent anywhere.
 
-This is the **Chromium (Manifest V3) port** — Chrome, Edge, Brave, Opera,
-Vivaldi (Chrome 111+). The Firefox add-on lives in its own repo
-(`YouTube-Shorts-Blocker-and-Watched-Video-Hider`), which is the primary
-codebase; feature changes land there first and are ported here.
+This is the **Chromium (Manifest V3) port** for Chrome, Edge, Brave, Opera and
+Vivaldi (Chrome 111+). The Firefox add-on lives in its own repo,
+[`YouTubeTwitch-Enhancer`](https://github.com/C4rcer/YouTubeTwitch-Enhancer),
+which is the primary codebase; feature changes land there first and are ported
+here.
 
 **[♥ Support development on Ko-fi](https://ko-fi.com/carcer7378)**
 
-## Features
+## YouTube features
 
 - **Block entire channels.** Open a video's **⋮ menu** and click the injected
-  **Block channel** item, right-click any video → **Block this YouTube channel**,
-  or add channels by `@handle`, URL, `UC…` ID, or name in the popup/options.
-  Every tile from a blocked channel disappears everywhere — home, search,
-  sidebar, subscriptions, channel pages, end-screen suggestions.
+  **Block channel** item, right-click any video → **Block this YouTube
+  channel**, or add channels by `@handle`, URL, `UC…` ID, or name in the
+  popup/options. Every tile from a blocked channel disappears everywhere:
+  home, search, sidebar, subscriptions, channel pages, end-screen suggestions.
 - **Undo.** Misclicked? Every block/hide shows a toast with an **Undo** button.
 - **Keyword / title blocking.** Hide any video whose title contains a word or
-  phrase — or use `/regex/` patterns. Great for dodging spoilers, reaction
-  content, or topics you're done with.
+  phrase, or use `/regex/` patterns.
+- **Keyword-filter comments.** A separate keyword list (same syntax) hides
+  matching comments: the whole thread when the top comment matches, just the
+  reply otherwise.
 - **Black out blocked channels.** Landing on a blocked channel's page or video
-  stops playback and covers the content with a black panel (recommendations
-  stay, one-click unblock available) — best-effort at not registering a view.
-- **Remove all Shorts** — sidebar entry, channel tabs, shelves, and
+  stops playback and covers the content with a black panel (one-click unblock
+  available), best-effort at not registering a view.
+- **Remove all Shorts**: sidebar entry, channel tabs, shelves, and
   `/shorts/<id>` URLs auto-redirect to the normal `/watch` player.
 - **Hide already-watched videos** past a progress threshold (default 75%),
   scoped per surface: Home, Subscriptions, Search, Related, Channel pages,
-  Playlists — each individually toggleable (playlists off by default so
-  Watch Later keeps showing progress).
-- **Reveal hidden (audit mode).** See everything the extension filtered, dimmed
-  with a red outline, instead of removed — so you can trust what it's doing
-  and rescue anything. Toggle off for a pure cleaned page.
-- **Master switch.** One toggle in the popup pauses the entire extension
-  instantly, no reload needed.
-- **Hide individual videos** — right-click → **Hide this video**, or
-  **Ctrl + right-click** for an instant hide (works on end-screen suggestions
-  too).
-- **Clean-up extras** — ads/promos/nudges (on by default), plus optional
-  hiding of Mixes, playlist tiles, news/topic shelves, the sidebar loading
-  spinner, and end-screen/pause-screen suggestions.
+  Playlists. Each is individually toggleable.
+- **Reveal hidden (audit mode).** See everything the extension filtered,
+  dimmed with a red outline, instead of removed.
+- **Master switch.** One toggle in the popup pauses everything instantly.
+- **Hide individual videos**: right-click → **Hide this video**, or
+  **Ctrl + right-click** for an instant hide.
+- **Hide members-only videos** (optional, off by default).
+- **Clean-up extras**: ads/promos/nudges (on by default), plus optional hiding
+  of Mixes, playlist tiles, news/topic shelves, the sidebar loading spinner,
+  and end-screen/pause-screen suggestions.
 - **Auto max quality.** Each new video is set to the highest available
   resolution.
+- **Playback speed suite.** A default speed for every new video (live streams
+  are skipped), stepping with **[** / **]** (±0.25×, 0.1–8×), reset with
+  **\\**, and optional per-channel speed memory.
+- **Audio compressor.** A 🎚 button in the player controls runs the sound
+  through a dynamics compressor: quiet dialogue comes up, sudden loud parts
+  come down.
+- **A-B loop.** A 🔁 button: first click marks the start, second the end,
+  third clears it.
+- **Screenshot.** A 📷 button saves the current frame as a PNG.
+- **Never pause me.** Dismisses the "Video paused. Continue watching?" idle
+  prompt. On by default.
+- **Keep autoplay off / auto-expand description.** Two small optional toggles.
 - **In-player volume boost.** A second slider appears next to YouTube's own
   volume control once volume sits at 100%, extending it to 500% via a Web
-  Audio gain node; scrolling over the player adjusts volume/boost. The audio
-  graph is only built when you actually boost, so default playback stays
-  native.
+  Audio gain node; scrolling over the player adjusts volume/boost.
+- **Cinema mode.** A ◐ button darkens everything around the player.
 - **Import / export / sync.** One-click JSON export/import (merge, no
-  duplicates) and optional **browser sync** (Chrome Sync) so your block lists
-  follow your browser account. Settings stay per-device.
+  duplicates) and optional **browser sync** (e.g. Chrome Sync) so your block
+  lists follow your browser account. Settings stay per-device.
 - **Reduce flashing.** Watched videos are held hidden from first paint instead
   of popping in and vanishing.
 
-Designed for desktop YouTube (`www.youtube.com`).
+## Community data integrations (all off by default)
+
+Three opt-in YouTube features backed by free community-run services, replacing
+the separate SponsorBlock / DeArrow / Return YouTube Dislike extensions:
+
+- **SponsorBlock: skip segments.** Auto-skips crowdsourced sponsor reads,
+  self-promos, like/subscribe reminders and (optionally) intros, outros,
+  previews, non-music sections and filler. Lookups use SponsorBlock's
+  k-anonymity endpoint: only a 4-character hash prefix of the video ID leaves
+  your browser.
+- **DeArrow: community titles & thumbnails.** Replaces clickbait titles (and,
+  via a separate heavier toggle, thumbnails) with community-submitted ones
+  where they exist.
+- **Return YouTube Dislike.** Shows the crowdsourced dislike count on the
+  watch page's dislike button.
+
+**Data credits:** segment and title/thumbnail data by
+[SponsorBlock](https://sponsor.ajay.app) and
+[DeArrow](https://dearrow.ajay.app) (Ajay Ramachandran and contributors),
+licensed [CC BY-NC-SA 4.0](https://github.com/ajayyy/SponsorBlock/wiki/Database-and-API-License);
+dislike counts by [Return YouTube Dislike](https://returnyoutubedislike.com).
+This extension is a non-commercial consumer of those APIs and is not
+affiliated with either project. Please consider supporting them directly.
+
+## Twitch features
+
+All Twitch features have their own toggles: the popup's **Twitch** tab has the
+quick switches, and **⚙ Twitch advanced…** opens a full Twitch-only manager
+page.
+
+- **Block Twitch channels.** Right-click any stream card → **Block this
+  Twitch channel**, or add channels by name/URL. Blocked channels vanish from
+  the front page, directory grids, search, and the side nav.
+- **Block whole categories.** Right-click → **Block this Twitch category**, or
+  add by name or directory URL. Usually the most effective clean-up: block the
+  category once instead of chasing individual channels.
+- **Stream title keywords, blocked tags & hide reruns.** Same `/regex/` syntax
+  as the YouTube side.
+- **Auto-claim channel points.** The bonus chest is clicked the moment it
+  appears, including in background tabs.
+- **Auto-claim drops and Moments.** When a drop is ready, the extension opens
+  the drops inventory in a background tab, claims everything, and closes it
+  again. Moment badges are grabbed the instant their chat callout appears.
+- **Anonymous chat (off by default).** Connects to chat as an anonymous user
+  so you never appear in the viewer list. Chat becomes read-only while it's
+  on; points still accrue.
+- **Third-party emotes.** BetterTTV, FrankerFaceZ and 7TV emotes (global sets
+  plus the current channel's) render in chat, and a 😼 button opens a
+  searchable picker. Privacy note: with this toggle on, emote lists are
+  fetched from those three services, which see the channel you're watching.
+- **Chat performance tools**: line limit, message batching, smooth scrolling.
+- **Chat filters**: highlight messages containing your keywords, hide messages
+  by word/phrase/`/regex/` or by user.
+- **Alternating line shading & show deleted** (off by default).
+- **Emote tab-completion.** Tab completes third-party emote names while
+  typing; Tab again cycles the matches.
+- **Clip download.** Clip pages get a ⬇ Download button.
+- **Hide the front-page carousel**, and **hide chat** (visual-only, so points
+  keep accruing).
+- **Clip helper.** Create a clip with Twitch's own Clip button (or Alt+X),
+  publish it, then the **➤ Share clip** button pastes the link into chat and
+  sends it.
+- **Pin source quality.** New streams start at the highest available quality
+  instead of "Auto".
+- **In-player volume boost, audio compressor, screenshot, cinema mode**: same
+  as the YouTube side.
+- **Speed hotkeys on VODs & clips.** Live streams are never touched.
+- **Stream uptime.** A ⏱ chip next to the viewer count, read from the page
+  itself with no extra requests (best-effort).
+- **Sidebar hover previews.** Hovering a live channel in the left sidebar
+  shows its current stream thumbnail.
+- **Hide extension overlays.** Optionally removes streamer-installed extension
+  panels and their notifications from the player.
+
+Designed for desktop `www.youtube.com` and `www.twitch.tv`.
 
 ## Install
 
-No build step — this folder is a complete unpacked extension:
+No build step; this folder is a complete unpacked extension:
 
 1. Open `chrome://extensions` (or `edge://extensions`, `brave://extensions`).
 2. Enable **Developer mode**.
 3. Click **Load unpacked** and select this folder.
-4. Open (or reload) any YouTube tab.
+4. Open (or reload) any YouTube or Twitch tab.
 
 To build the store upload package, run `powershell -File build.ps1`. It writes
-`youtube-blocker-chromium-<version>.zip` containing only the extension files
-(`manifest.json`, `icons/`, `src/`, `LICENSE`).
+`youtube-twitch-enhancer-chromium-<version>.zip` containing only the extension
+files (`manifest.json`, `icons/`, `src/`, `LICENSE`).
 
 Do **not** package it with `Compress-Archive`: on Windows PowerShell 5.1 that
 cmdlet stores entries with backslash separators (`icons\icon-16.png`), which
@@ -82,29 +168,18 @@ the manifest's `icons/` paths. `build.ps1` writes proper forward-slash entries.
 - **From the ⋮ menu (recommended):** open a video's three-dot menu and click
   the injected **Block channel** item.
 - **From a video:** right-click any tile → **Block this YouTube channel**.
-- **From a channel's page:** right-click anywhere → **Block this YouTube channel**.
-- **By hand:** popup or **Manage block list…** → type `@handle`, channel URL,
+- **By hand:** popup or **⚙ Advanced…** → type `@handle`, channel URL,
   `UC…` ID, or display name → **Block**.
-
-### Hide a single video
-
-Right-click the tile → **Hide this video**, or **Ctrl + right-click** to hide
-instantly (also works on the in-player end-screen video wall).
-
-### Keywords
-
-Options page → **Blocked title keywords** → add words, phrases, or
-`/patterns/` — matching titles are hidden wherever they appear.
 
 ### Import / export / sync
 
 | Button / toggle | What it does |
 | --- | --- |
 | **Export to file** | Downloads `youtube-blocklist-YYYY-MM-DD.json`. |
-| **Import from file** | Merges into your current list (no duplicates; settings only change if present in the file). |
+| **Import from file** | Merges into your current list (no duplicates). |
 | **Copy JSON** | Copies the whole block list to the clipboard. |
 | **Clear everything** | Removes all blocked channels, hidden videos and keywords (keeps settings). |
-| **Browser sync** | Mirrors the block lists (not settings) to your browser account (Chrome Sync). |
+| **Browser sync** | Mirrors the block lists (not settings) to your browser account. |
 
 The JSON format is identical to the Firefox add-on's, so block lists move
 freely between the two.
@@ -123,30 +198,37 @@ freely between the two.
 Everything runs locally. The extension collects **no data**, phones home to
 **nothing**, and requires no account. Your block list lives in
 `chrome.storage.local` (and, only if you enable it, `chrome.storage.sync`
-inside your own browser account).
+inside your own browser account). Scoped exceptions, each behind its own
+toggle, are described in [PRIVACY.md](PRIVACY.md): third-party emotes (BTTV /
+FFZ / 7TV), the community data features (SponsorBlock / DeArrow / RYD), and
+Twitch sidebar hover previews. With those toggles off, no feature makes any
+network request.
 
 ## How it works
 
-- **`src/content.js`** runs at `document_start`. A debounced `MutationObserver`
-  (added/removed nodes only) plus a 2 s safety interval re-runs the cleanup
-  pass on infinite scroll / SPA navigation; passes are skipped while the tab
-  is hidden and caught up on focus. Channel matching merges the `@handle`,
-  `UC…` ID, and display name found in a tile and compares case-insensitively;
-  tiles are tagged per config version so unchanged tiles aren't re-scanned.
-  Tiles are hidden in place (CSS) rather than removed, which avoids fighting
-  YouTube's renderer and is what makes audit mode and Undo possible.
-- **`src/page-quality.js`** (Chromium-specific) runs in the page's MAIN world.
-  Chromium content scripts are fully isolated from the page, so content.js
-  can't call YouTube's player API directly (on Firefox it can, via
-  `wrappedJSObject`); instead it relays a `postMessage` request that this
-  helper answers once the player accepted the max-quality change.
-- **`src/background.js`** registers the right-click menu, opens the onboarding
-  page on first install, and mirrors block lists to Chrome Sync (chunked to
-  fit `storage.sync` quotas) when enabled. It's loaded through the
-  **`src/background-sw.js`** Manifest V3 service-worker entry.
-- **`src/popup.*`** and **`src/options.*`** share storage helpers in
-  **`src/common.js`**; state lives under one `data` key and syncs across
-  contexts via `storage.onChanged`.
+- **`src/content.js`** (YouTube) and **`src/twitch.js`** (Twitch) run at
+  `document_start`. A debounced `MutationObserver` plus a 2 s safety interval
+  re-runs the cleanup pass on infinite scroll / SPA navigation; passes are
+  skipped while the tab is hidden and caught up on focus. Tiles are hidden in
+  place (CSS) rather than removed, which is what makes audit mode and Undo
+  possible.
+- **`src/page-quality.js`** and **`src/page-twitch.js`** (Chromium-specific)
+  run in the page's MAIN world. Chromium content scripts are fully isolated
+  from the page, so the content scripts can't reach YouTube's player API or
+  Twitch's React fibers directly (on Firefox they can, via
+  `wrappedJSObject`); instead they relay `postMessage` requests that these
+  helpers answer: max quality and playback rate on YouTube; the Slate chat
+  editor, channel id, stream start time, and the anonymous-chat WebSocket
+  shim on Twitch.
+- **`src/background.js`** registers the right-click menus, opens the
+  onboarding page on first install, relays the SponsorBlock / DeArrow / RYD
+  and emote-API lookups (so page CSP and CORS never interfere), and mirrors
+  block lists to browser sync (chunked to fit `storage.sync` quotas) when
+  enabled. It's loaded through the **`src/background-sw.js`** Manifest V3
+  service-worker entry.
+- **`src/popup.*`**, **`src/options.*`** and **`src/twitch-options.*`** share
+  storage helpers in **`src/common.js`**; state lives under one `data` key
+  and syncs across contexts via `storage.onChanged`.
 - Content-script instances are tagged with a per-load id and hand over via a
   takeover event, so in-place extension updates never leave orphaned handlers
   fighting the new version.
@@ -158,13 +240,16 @@ manifest.json                   — Manifest V3 (Chrome 111+)
 icons/icon-*.png                — manifest icons (Chromium rejects SVG there)
 icons/icon.svg                  — used by the popup/options/onboarding pages
 src/
-  content.js     content.css    — the on-page engine
-  page-quality.js               — MAIN-world max-quality helper (Chromium-only)
-  background.js                 — context menus, onboarding, browser sync
+  content.js     content.css    — the on-page engine (YouTube)
+  twitch.js      twitch.css     — the on-page engine (Twitch)
+  page-quality.js               — MAIN-world YouTube player helper (Chromium-only)
+  page-twitch.js                — MAIN-world Twitch page-internals helper (Chromium-only)
+  background.js                 — context menus, onboarding, API relays, browser sync
   background-sw.js              — MV3 service-worker entry (importScripts)
   common.js                     — shared storage/import/export helpers
-  popup.html     popup.js       — toolbar popup
-  options.html   options.js     — full manager
+  popup.html     popup.js       — toolbar popup (YouTube + Twitch panels)
+  options.html   options.js     — full manager (YouTube)
+  twitch-options.html/.js       — full manager (Twitch)
   onboarding.html               — first-run guide
   ui.css                        — shared popup/options styling
 ```

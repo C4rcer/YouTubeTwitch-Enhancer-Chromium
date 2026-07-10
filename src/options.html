@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>YouTube Blocker — Manage</title>
+    <title>YouTube/Twitch Enhancer — YouTube settings</title>
     <link rel="stylesheet" href="ui.css">
     <style>
         body { max-width: 720px; margin: 0 auto; }
@@ -29,8 +29,8 @@
     <div class="header">
         <img src="../icons/icon.svg" alt="">
         <div class="grow">
-            <h1>YouTube Channel Blocker &amp; Cleaner</h1>
-            <div class="sub">Manage blocked channels, hidden videos, keywords, and settings</div>
+            <h1>YouTube/Twitch Enhancer</h1>
+            <div class="sub">YouTube: blocked channels, hidden videos, keywords, and settings · <a href="twitch-options.html">Twitch settings →</a></div>
         </div>
         <label class="toggle" title="Master switch — turns every feature on or off">
             <input type="checkbox" id="set-enabled">
@@ -56,6 +56,15 @@
             <button class="primary" id="kw-btn">Add</button>
         </div>
         <div class="chips" id="kw-list"></div>
+    </div>
+
+    <div class="section">
+        <h2>Blocked comment keywords</h2>
+        <div class="row">
+            <input type="text" id="ckw-input" class="grow" placeholder='Hide comments containing… (or /regex/ for patterns)'>
+            <button class="primary" id="ckw-btn">Add</button>
+        </div>
+        <div class="chips" id="ckw-list"></div>
     </div>
 
     <div class="section">
@@ -118,6 +127,50 @@
             <input type="checkbox" id="set-wheelvol">
             <span class="t-text">In-player volume boost &amp; scroll volume<small>Adds a boost slider (100–500%) next to YouTube's volume control once volume sits at 100%, and lets you scroll over the video to change volume.</small></span>
         </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-cinema">
+            <span class="t-text">Cinema mode button<small>Adds a ◐ button to the player controls that darkens everything around the video. Esc or clicking the dark area exits.</small></span>
+        </label>
+    </div>
+
+    <div class="section">
+        <h2>Player tools</h2>
+        <div class="row">
+            <span class="grow">Default playback speed<br><small class="muted">Applied to each new video (live streams are skipped). 1 = YouTube's default.</small></span>
+            <input type="number" id="set-speed" min="0.1" max="8" step="0.05" style="width:80px;">
+        </div>
+        <label class="toggle">
+            <input type="checkbox" id="set-speedkeys">
+            <span class="t-text">Speed hotkeys<small><b>[</b> slower, <b>]</b> faster (±0.25×, up to 8×), <b>\</b> back to 1×.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-speedchan">
+            <span class="t-text">Remember speed per channel<small>A speed set with the hotkeys is re-applied to future videos from that channel.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-comp">
+            <span class="t-text">Audio compressor button<small>🎚 button in the player controls: evens out quiet dialogue and loud passages. Its on/off state is remembered.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-loop">
+            <span class="t-text">A-B loop button<small>🔁 button: first click marks the loop start, second the end (starts looping), third clears it.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-shot">
+            <span class="t-text">Screenshot button<small>📷 button: saves the current frame as a PNG.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-nopause">
+            <span class="t-text">Never pause me<small>Dismisses YouTube's "Video paused. Continue watching?" idle prompt so playback never stops.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-noautoplay">
+            <span class="t-text">Keep autoplay off<small>Forces YouTube's up-next autoplay toggle off so the next video never starts by itself.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-expanddesc">
+            <span class="t-text">Auto-expand description<small>Opens the "…more" description box on every video you watch.</small></span>
+        </label>
     </div>
 
     <div class="section">
@@ -135,6 +188,10 @@
             <span class="t-text">Hide playlist tiles<small>Playlist suggestions in feeds and search (never the playlist page itself or your queue).</small></span>
         </label>
         <label class="toggle">
+            <input type="checkbox" id="set-members">
+            <span class="t-text">Hide members-only videos<small>Videos badged "Members only" on every page. Leave off if you're a member of some channels and want to see their members-only uploads.</small></span>
+        </label>
+        <label class="toggle">
             <input type="checkbox" id="set-news">
             <span class="t-text">Hide news &amp; topic shelves<small>Breaking-news rows and topic sections on Home (always hidden while "Remove Shorts" is on).</small></span>
         </label>
@@ -149,10 +206,50 @@
     </div>
 
     <div class="section">
+        <h2>Community data <span class="muted" style="font-weight:400;font-size:11px;">(opt-in)</span></h2>
+        <div class="muted" style="margin-bottom:10px;font-size:11px;">
+            These features query free community-run services and are <b>off by default</b>.
+            SponsorBlock lookups send only a hashed prefix of the video ID (k-anonymity), so the
+            exact video you watch is not revealed; DeArrow and Return YouTube Dislike lookups send
+            the video ID. Data credits:
+            <a href="https://sponsor.ajay.app" target="_blank" rel="noopener">SponsorBlock</a> &amp;
+            <a href="https://dearrow.ajay.app" target="_blank" rel="noopener">DeArrow</a> by Ajay
+            Ramachandran (licensed CC BY-NC-SA 4.0), and
+            <a href="https://returnyoutubedislike.com" target="_blank" rel="noopener">Return YouTube Dislike</a>.
+        </div>
+        <label class="toggle">
+            <input type="checkbox" id="set-sb">
+            <span class="t-text">SponsorBlock: skip segments<small>Auto-skips crowdsourced segments in videos. Pick the categories below; a small ⏭ notice shows on each skip.</small></span>
+        </label>
+        <div class="subtoggles" id="sb-cats">
+            <label class="toggle"><input type="checkbox" id="set-sb-sponsor"><span class="t-text">Sponsors</span></label>
+            <label class="toggle"><input type="checkbox" id="set-sb-selfpromo"><span class="t-text">Self-promotion</span></label>
+            <label class="toggle"><input type="checkbox" id="set-sb-interaction"><span class="t-text">Like/subscribe reminders</span></label>
+            <label class="toggle"><input type="checkbox" id="set-sb-intro"><span class="t-text">Intros</span></label>
+            <label class="toggle"><input type="checkbox" id="set-sb-outro"><span class="t-text">Outros / end cards</span></label>
+            <label class="toggle"><input type="checkbox" id="set-sb-preview"><span class="t-text">Previews / recaps</span></label>
+            <label class="toggle"><input type="checkbox" id="set-sb-offtopic"><span class="t-text">Non-music sections</span></label>
+            <label class="toggle"><input type="checkbox" id="set-sb-filler"><span class="t-text">Filler tangents</span></label>
+        </div>
+        <label class="toggle">
+            <input type="checkbox" id="set-de-titles">
+            <span class="t-text">DeArrow: community titles<small>Replaces clickbait titles with community-submitted ones where they exist (tiles and the watch page).</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-de-thumbs">
+            <span class="t-text">DeArrow: community thumbnails<small>Swaps thumbnails for a community-chosen video frame. Heavier: each thumbnail is rendered by DeArrow's server.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-ryd">
+            <span class="t-text">Return YouTube Dislike<small>Shows the dislike count on the watch page's dislike button (crowdsourced estimate).</small></span>
+        </label>
+    </div>
+
+    <div class="section">
         <h2>Import / Export / Sync</h2>
         <label class="toggle">
             <input type="checkbox" id="set-sync">
-            <span class="t-text">Sync block lists via your browser account<small>Channels, videos and keywords follow your browser account (Chrome Sync). Settings stay per-device. <span id="sync-status"></span></small></span>
+            <span class="t-text">Sync block lists via browser sync<small>Channels, videos and keywords follow your browser's own sync (e.g. your Google account in Chrome). Settings stay per-device. <span id="sync-status"></span></small></span>
         </label>
         <div class="btn-grid" style="margin-top:8px;">
             <button id="export-btn">⬇ Export to file</button>

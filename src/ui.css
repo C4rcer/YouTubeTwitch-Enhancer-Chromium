@@ -156,3 +156,26 @@ label.toggle .t-text small { color: var(--muted); font-size: 11px; }
 .status.err { color: var(--accent); }
 .hidden-input { display: none; }
 .muted { color: var(--muted); }
+.hidden { display: none !important; }
+
+/* Site switcher (popup header): YouTube keeps the red accent, Twitch gets
+ * its own purple so it's obvious which side you're configuring. */
+.site-tabs {
+    display: inline-flex;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px;
+    gap: 2px;
+}
+.site-tab {
+    border: none;
+    background: transparent;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.site-tab:hover { background: #2c2c2c; }
+.site-tab.active { background: var(--accent); color: #fff; }
+#tab-twitch.active { background: var(--twitch, #9147ff); }

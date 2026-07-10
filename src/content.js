@@ -1,5 +1,5 @@
 /* ==================================================================
- * YouTube Channel Blocker & Cleaner — content script
+ * YouTube/Twitch Enhancer — YouTube content script
  *
  * Runs on every YouTube page. Responsibilities:
  *   - Remove Shorts (sidebar, tabs, shelves, /shorts redirect)   [setting]
@@ -53,9 +53,34 @@
         hideMixes: false,
         hidePlaylists: false,
         hideNewsShelves: false,
+        hideMembersOnly: false,      // off by default: people may be members on some channels
         syncBlockLists: false,       // handled by the background script
         volumeBoost: 1,        // 1 = 100% (native, no Web Audio graph)
-        wheelVolume: true      // scroll over the player to change volume/boost
+        wheelVolume: true,     // scroll over the player to change volume/boost
+        ytCinemaButton: true,  // cinema-mode (darken page) button in the player
+        ytCompressorButton: true,   // 🎚 audio-compressor button in the player controls
+        ytCompressorOn: false,      // compressor engaged (remembered across loads)
+        ytLoopButton: true,         // 🔁 A-B loop button in the player controls
+        ytShotButton: true,         // 📷 screenshot button in the player controls
+        ytSpeedDefault: 1,          // playback speed applied to each new (non-live) video
+        ytSpeedPerChannel: false,   // remember the last hotkey speed per channel
+        ytSpeedHotkeys: true,       // [ and ] step speed, \ resets
+        ytNoPauseDialog: true,      // auto-dismiss "Video paused. Continue watching?"
+        ytDisableAutoplay: false,   // keep YouTube's up-next autoplay toggle off
+        ytAutoExpandDesc: false,    // auto-expand the watch-page description
+        // ---- Community data (opt-in; all off by default) ----
+        sbEnabled: false,
+        sbSkipSponsor: true,
+        sbSkipSelfpromo: true,
+        sbSkipInteraction: true,
+        sbSkipIntro: false,
+        sbSkipOutro: false,
+        sbSkipPreview: false,
+        sbSkipOfftopic: false,
+        sbSkipFiller: false,
+        deArrowTitles: false,
+        deArrowThumbs: false,
+        rydEnabled: false
     };
 
     /* ---- live state ------------------------------------------------ */
@@ -63,11 +88,14 @@
         hiddenVideoIds: [],
         blockedChannels: [],
         blockedKeywords: [],
+        ytCommentKeywords: [],
+        ytChannelSpeeds: {},
         settings: Object.assign({}, DEFAULT_SETTINGS)
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
     let hiddenSet = new Set();
     let keywordMatchers = [];   // compiled from state.blockedKeywords
+    let commentMatchers = [];   // compiled from state.ytCommentKeywords
     let blockedIndex = { handles: new Set(), ids: new Set(), names: new Set() };
     let configVersion = 0;
     let lastSerialized = '';          // guard against echoing our own writes
@@ -91,7 +119,14 @@
         'ytd-rich-grid-media',
         'yt-lockup-view-model',
         'ytm-shorts-lockup-view-model',
-        'ytm-shorts-lockup-view-model-v2'
+        'ytm-shorts-lockup-view-model-v2',
+        // m.youtube.com (Firefox for Android) tile containers
+        'ytm-rich-item-renderer',
+        'ytm-video-with-context-renderer',
+        'ytm-compact-video-renderer',
+        'ytm-playlist-video-renderer',
+        'ytm-video-card-renderer',
+        'ytm-media-item'
     ].join(',');
 
     const OUTER_GRID_CELLS = [
@@ -99,14 +134,21 @@
         'ytd-video-renderer',
         'ytd-grid-video-renderer',
         'ytd-compact-video-renderer',
-        'ytd-playlist-video-renderer'
+        'ytd-playlist-video-renderer',
+        'ytm-rich-item-renderer',
+        'ytm-video-with-context-renderer',
+        'ytm-compact-video-renderer',
+        'ytm-playlist-video-renderer'
     ].join(',');
 
     const PROGRESS_SELECTORS = [
         'ytd-thumbnail-overlay-resume-playback-renderer #progress',
         '#progress[style*="width"]',
         '.ytThumbnailOverlayProgressBarHostWatchedProgressBarSegment',
-        'yt-thumbnail-overlay-progress-bar-view-model div[style*="width"]'
+        'yt-thumbnail-overlay-progress-bar-view-model div[style*="width"]',
+        // m.youtube.com watched-progress overlay
+        'ytm-thumbnail-overlay-resume-playback-renderer .thumbnail-overlay-resume-playback-progress',
+        '.thumbnail-overlay-resume-playback-progress[style*="width"]'
     ].join(',');
 
     const WATCHED_BAR_CONTAINERS = [
@@ -123,8 +165,50 @@
         'ytd-statement-banner-renderer',
         'ytd-banner-promo-renderer',
         'ytd-feed-tutorial-renderer',
-        'ytd-clarification-renderer'
+        'ytd-clarification-renderer',
+        'ytm-ad-slot-renderer',
+        'ytm-promoted-video-renderer',
+        'ytm-companion-ad-renderer',
+        'ytm-statement-banner-renderer'
     ].join(',');
+
+    // Members-only tiles. The classic desktop badge carries a language-
+    // independent class; the newer view-model lockups and m.youtube.com only
+    // expose the label text, so those hosts are matched against the badge
+    // label in YouTube's most common UI languages (same approach as DNR_TEXTS).
+    const MEMBERS_BADGE_CLASS_SEL = '.badge-style-type-members-only';
+    const MEMBERS_BADGE_TEXT_HOSTS = [
+        'ytd-badge-supported-renderer',
+        'badge-shape',
+        'yt-thumbnail-badge-view-model',
+        'ytm-badge',
+        'ytm-thumbnail-overlay-badge-view-model'
+    ].join(',');
+
+    const MEMBERS_TEXTS = [
+        'members only', 'members first',                  // en (+ early access)
+        'nur für mitglieder',                             // de
+        'solo para miembros', 'sólo para miembros',       // es
+        'réservé aux membres', 'réservée aux membres',    // fr
+        'solo per i membri',                              // it
+        'apenas para membros', 'somente para membros',    // pt
+        'alleen voor leden',                              // nl
+        'tylko dla wspierających',                        // pl
+        'только для спонсоров',                           // ru
+        'üyelere özel',                                   // tr
+        'メンバー限定',                                    // ja
+        '회원 전용',                                       // ko
+        '会员专享', '会员专属', '會員專屬', '仅限会员',       // zh
+        'للأعضاء فقط'                                     // ar
+    ];
+
+    function isMembersText(raw) {
+        if (!raw) return false;
+        const t = raw.trim().toLowerCase();
+        // Badge labels are short; a long string means we grabbed a container.
+        if (!t || t.length > 60) return false;
+        return MEMBERS_TEXTS.some(s => t.includes(s));
+    }
 
     const SHORTS_CSS = `
         ytd-guide-entry-renderer:has(a[title="Shorts"]),
@@ -133,7 +217,12 @@
         ytd-mini-guide-entry-renderer a[title="Shorts"],
         yt-tab-shape[tab-title="Shorts"],
         tp-yt-paper-tab[aria-label="Shorts"],
-        tp-yt-paper-tab:has(> .tab-content[title="Shorts"]) {
+        tp-yt-paper-tab:has(> .tab-content[title="Shorts"]),
+        ytm-pivot-bar-item-renderer:has(.pivot-shorts),
+        ytm-pivot-bar-item-renderer:has([tab-identifier="pivot-shorts"]),
+        ytm-pivot-bar-item-renderer:has(a[href^="/shorts"]),
+        ytm-reel-shelf-renderer,
+        ytm-rich-section-renderer:has(ytm-reel-shelf-renderer) {
             display: none !important;
         }
     `;
@@ -147,12 +236,17 @@
         'ytd-grid-video-renderer',
         'ytd-compact-video-renderer',
         'ytd-playlist-video-renderer',
-        'yt-lockup-view-model'
+        'yt-lockup-view-model',
+        'ytm-rich-item-renderer',
+        'ytm-video-with-context-renderer',
+        'ytm-compact-video-renderer',
+        'ytm-playlist-video-renderer'
     ];
     const ANTIFLASH_WATCHED = [
         'ytd-thumbnail-overlay-resume-playback-renderer',
         '.ytThumbnailOverlayProgressBarHostWatchedProgressBar',
-        '.ytThumbnailOverlayProgressBarHostWatchedProgressBarLegacy'
+        '.ytThumbnailOverlayProgressBarHostWatchedProgressBarLegacy',
+        'ytm-thumbnail-overlay-resume-playback-renderer'
     ];
     const ANTIFLASH_SELECTOR = ANTIFLASH_CELLS
         .flatMap(cell => ANTIFLASH_WATCHED.map(w => `${cell}:has(${w}):not([data-ytb-keep])`))
@@ -198,6 +292,12 @@
     /* ==================================================================
      * 0. State load / save / derive
      * ================================================================== */
+    function cleanList(arr) {
+        return Array.isArray(arr)
+            ? [...new Set(arr.filter(k => typeof k === 'string' && k.trim()).map(k => k.trim()))]
+            : [];
+    }
+
     function normalize(d) {
         d = d || {};
         return {
@@ -205,29 +305,38 @@
             blockedChannels: Array.isArray(d.blockedChannels)
                 ? d.blockedChannels.filter(c => c && (c.handle || c.channelId || c.name))
                 : [],
-            blockedKeywords: Array.isArray(d.blockedKeywords)
-                ? [...new Set(d.blockedKeywords.filter(k => typeof k === 'string' && k.trim()).map(k => k.trim()))]
-                : [],
+            blockedKeywords: cleanList(d.blockedKeywords),
+            ytCommentKeywords: cleanList(d.ytCommentKeywords),
+            ytChannelSpeeds: (d.ytChannelSpeeds && typeof d.ytChannelSpeeds === 'object' &&
+                              !Array.isArray(d.ytChannelSpeeds))
+                ? Object.assign({}, d.ytChannelSpeeds)
+                : {},
             settings: Object.assign({}, DEFAULT_SETTINGS, d.settings || {})
         };
     }
 
     // Keywords are plain case-insensitive substrings, or /pattern/flags for
     // regex power users. A bad regex falls back to substring matching.
-    function compileKeywords() {
-        keywordMatchers = [];
-        for (const k of state.blockedKeywords) {
+    function compileMatcherList(list) {
+        const out = [];
+        for (const k of list) {
             const m = k.match(/^\/(.+)\/([a-z]*)$/i);
             if (m) {
                 try {
                     const re = new RegExp(m[1], m[2].includes('i') ? m[2] : m[2] + 'i');
-                    keywordMatchers.push(t => re.test(t));
+                    out.push(t => re.test(t));
                     continue;
                 } catch (e) { /* fall through to substring */ }
             }
             const needle = k.toLowerCase();
-            keywordMatchers.push(t => t.includes(needle));
+            out.push(t => t.includes(needle));
         }
+        return out;
+    }
+
+    function compileKeywords() {
+        keywordMatchers = compileMatcherList(state.blockedKeywords);
+        commentMatchers = compileMatcherList(state.ytCommentKeywords);
     }
 
     function rebuildDerived() {
@@ -249,26 +358,36 @@
         if (on && settings.revealHidden) document.documentElement.dataset.ytbReveal = '1';
         else delete document.documentElement.dataset.ytbReveal;
         configVersion++;
+        // Category toggles may have changed; refetch segments for this video
+        // (served from the background cache, so this is cheap).
+        sbState = { vid: null, segments: null, pending: false };
     }
 
     async function persist() {
         state = normalize(state);
         rebuildDerived();
         runAll();
+        await saveOnly();
+    }
+
+    // Persist without re-running the full pass (used by enrichment inside
+    // runAll). Load-merge-save: this script only owns the YouTube fields, so
+    // pull the full record first rather than clobbering the Twitch lists.
+    async function saveOnly() {
         try {
-            lastSerialized = JSON.stringify(state);
-            await api.storage.local.set({ [STORAGE_KEY]: state });
+            const stored = await api.storage.local.get(STORAGE_KEY);
+            const full = stored[STORAGE_KEY] || {};
+            full.hiddenVideoIds = state.hiddenVideoIds;
+            full.blockedChannels = state.blockedChannels;
+            full.blockedKeywords = state.blockedKeywords;
+            full.ytCommentKeywords = state.ytCommentKeywords;
+            full.ytChannelSpeeds = state.ytChannelSpeeds;
+            full.settings = Object.assign({}, full.settings, state.settings);
+            lastSerialized = JSON.stringify(normalize(full));
+            await api.storage.local.set({ [STORAGE_KEY]: full });
         } catch (e) {
             console.warn('[YT Blocker] Could not persist:', e);
         }
-    }
-
-    // Persist without re-running the full pass (used by enrichment inside runAll).
-    async function saveOnly() {
-        try {
-            lastSerialized = JSON.stringify(state);
-            await api.storage.local.set({ [STORAGE_KEY]: state });
-        } catch (e) { /* ignore */ }
     }
 
     function migrateLegacyLocalStorage() {
@@ -559,7 +678,8 @@
             if (cm) channelId = cm[1];
         }
         const header = document.querySelector(
-            'yt-page-header-renderer, ytd-browse[page-subtype="channels"] #page-header, #channel-header'
+            'yt-page-header-renderer, ytd-browse[page-subtype="channels"] #page-header, #channel-header, ' +
+            'ytm-c4-tabbed-header-renderer, .c4-tabbed-header'
         );
         if (!handle && header) {
             const hLink = header.querySelector('a[href^="/@"]');
@@ -572,7 +692,8 @@
         }
         const nameEl = document.querySelector(
             'yt-page-header-renderer h1, yt-dynamic-text-view-model h1, ' +
-            'ytd-channel-name #text, #channel-name #text, #channel-header #text'
+            'ytd-channel-name #text, #channel-name #text, #channel-header #text, ' +
+            'ytm-c4-tabbed-header-renderer h1, .c4-tabbed-header-channel-name'
         );
         const name = nameEl ? cleanText(nameEl.textContent) : '';
 
@@ -585,7 +706,7 @@
     // name text (the first link is often the text-less avatar), so name-only
     // blocks still match. Falls back to microdata early in the page lifecycle.
     function getWatchPageOwnerInfo() {
-        const owner = document.querySelector('ytd-video-owner-renderer, #owner');
+        const owner = document.querySelector('ytd-video-owner-renderer, ytm-slim-owner-renderer, #owner');
         if (owner) {
             let handle = '', channelId = '', name = '';
             const link = owner.querySelector('a[href*="/channel/"], a[href^="/@"]');
@@ -598,7 +719,8 @@
             }
             const nameEl = owner.querySelector(
                 'ytd-channel-name #text, #channel-name #text, ' +
-                'ytd-channel-name yt-formatted-string, #channel-name a'
+                'ytd-channel-name yt-formatted-string, #channel-name a, ' +
+                '.slim-owner-channel-name'
             );
             if (nameEl) name = cleanText(nameEl.textContent);
             if (!name) {
@@ -686,7 +808,9 @@
             'ytd-reel-shelf-renderer:not(.ytb-removed)',
             'ytd-reel-item-renderer:not(.ytb-removed)',
             'ytm-shorts-lockup-view-model:not(.ytb-removed)',
-            'ytm-shorts-lockup-view-model-v2:not(.ytb-removed)'
+            'ytm-shorts-lockup-view-model-v2:not(.ytb-removed)',
+            'ytm-reel-shelf-renderer:not(.ytb-removed)',
+            'ytm-reel-item-renderer:not(.ytb-removed)'
         ].join(',')).forEach(hideEl);
         document.querySelectorAll('a[href*="/shorts/"]').forEach(a => {
             const cell = a.closest(OUTER_GRID_CELLS) || a.closest('yt-lockup-view-model');
@@ -719,9 +843,24 @@
                 if (cell) removeTile(cell);
             });
             document.querySelectorAll(
-                'ytd-playlist-renderer:not(.ytb-removed), ytd-grid-playlist-renderer:not(.ytb-removed), ytd-compact-playlist-renderer:not(.ytb-removed), ytd-radio-renderer:not(.ytb-removed), ytd-compact-radio-renderer:not(.ytb-removed)'
+                'ytd-playlist-renderer:not(.ytb-removed), ytd-grid-playlist-renderer:not(.ytb-removed), ytd-compact-playlist-renderer:not(.ytb-removed), ytd-radio-renderer:not(.ytb-removed), ytd-compact-radio-renderer:not(.ytb-removed), ytm-playlist-renderer:not(.ytb-removed), ytm-compact-playlist-renderer:not(.ytb-removed), ytm-radio-renderer:not(.ytb-removed), ytm-compact-radio-renderer:not(.ytb-removed)'
             ).forEach(hideEl);
         }
+    }
+
+    // Members-only videos, matched by their thumbnail/metadata badge. The
+    // badge elements are few, so scanning them and walking up with closest()
+    // is cheap (same pattern as the watched-progress passes).
+    function removeMembersOnly() {
+        document.querySelectorAll(MEMBERS_BADGE_CLASS_SEL).forEach(badge => {
+            if (badge.closest('.ytb-removed')) return;   // tile already hidden
+            removeContainingTile(badge);
+        });
+        document.querySelectorAll(MEMBERS_BADGE_TEXT_HOSTS).forEach(badge => {
+            if (badge.closest('.ytb-removed')) return;
+            if (!isMembersText(badge.textContent)) return;
+            removeContainingTile(badge);
+        });
     }
 
     // Which surface are we on, and is watched-hiding enabled for it?
@@ -818,6 +957,369 @@
         }
     }
 
+    // Hide comments (and single replies) whose text matches the comment
+    // keyword list. Same syntax as title keywords; hidden with .ytb-removed
+    // so audit mode reveals them dimmed like everything else.
+    function processComments() {
+        if (!commentMatchers.length || location.pathname !== '/watch') return;
+        const comments = document.querySelectorAll(
+            'ytd-comment-view-model, ytd-comment-renderer, ytm-comment-renderer');
+        for (const c of comments) {
+            if (c.closest('.ytb-removed')) continue;
+            const key = 'c' + configVersion;
+            if (c.dataset.ytbCchk === key) continue;
+            const textEl = c.querySelector('#content-text');
+            const text = textEl ? (textEl.textContent || '').toLowerCase() : '';
+            if (text && commentMatchers.some(fn => fn(text))) {
+                const thread = c.closest('ytd-comment-thread-renderer, ytm-comment-thread-renderer');
+                // Top-level comment: drop the whole thread. Reply: just it.
+                const top = thread && thread.querySelector(
+                    'ytd-comment-view-model, ytd-comment-renderer, ytm-comment-renderer');
+                hideEl(thread && c === top ? thread : c);
+            } else {
+                c.dataset.ytbCchk = key;
+            }
+        }
+    }
+
+    /* ---- watch-page conveniences ------------------------------------- */
+    function watchVideoId() {
+        return location.pathname === '/watch'
+            ? new URLSearchParams(location.search).get('v')
+            : null;
+    }
+
+    // "Video paused. Continue watching?" — YouTube fires this off an idle
+    // timer it keeps in the page-global `_lact` (last activity, ms). Keeping
+    // that fresh prevents the dialog outright (the YouTube NonStop trick);
+    // clicking the confirm button is the fallback if one still appears.
+    const PAUSE_DIALOG_TEXTS = [
+        'continue watching', 'video paused',
+        'wiedergabe fortsetzen', 'video pausiert',            // de
+        'continuer la lecture', 'vidéo en pause',             // fr
+        'continuar viendo', 'vídeo en pausa',                 // es
+        'continuar assistindo', 'vídeo pausado',              // pt
+        'continuare a guardare',                              // it
+        'verder kijken',                                      // nl
+        'kontynuować oglądanie',                              // pl
+        'продолжить просмотр',                                // ru
+        'izlemeye devam',                                     // tr
+        '再生を続行', '動画が一時停止',                          // ja
+        '계속 시청',                                           // ko
+        '继续观看', '繼續觀看'                                  // zh
+    ];
+    let lastLactRefresh = 0;
+
+    function preventIdlePause() {
+        if (!settings.ytNoPauseDialog || location.pathname !== '/watch') return;
+        try {
+            if (Date.now() - lastLactRefresh > 30000) {
+                lastLactRefresh = Date.now();
+                const pw = window.wrappedJSObject;
+                if (pw && typeof pw._lact === 'number') pw._lact = Date.now();
+                // Chromium: the page global is out of reach; page-quality.js
+                // refreshes _lact for us.
+                else window.postMessage({ type: 'ytb-lact' }, location.origin);
+            }
+        } catch (e) { /* page global unavailable */ }
+        const dlg = document.querySelector('ytd-popup-container yt-confirm-dialog-renderer');
+        if (!dlg || !isVisible(dlg)) return;
+        const text = (dlg.textContent || '').toLowerCase();
+        if (!PAUSE_DIALOG_TEXTS.some(s => text.includes(s))) return;
+        const btn = dlg.querySelector('#confirm-button button') || dlg.querySelector('#confirm-button');
+        if (!btn) return;
+        try {
+            btn.click();
+            const v = playerVideo();
+            if (v && v.paused) v.play().catch(() => {});
+        } catch (e) { /* ignore */ }
+    }
+
+    // Keep YouTube's up-next autoplay toggle off. One click normally sticks
+    // for the session/account; the guard stops a click loop if it doesn't.
+    let autoplayClickAt = 0;
+    function enforceAutoplayOff() {
+        if (!settings.ytDisableAutoplay || location.pathname !== '/watch') return;
+        if (Date.now() - autoplayClickAt < 5000) return;
+        const btn = document.querySelector('#movie_player .ytp-autonav-toggle-button');
+        if (btn && btn.getAttribute('aria-checked') === 'true') {
+            autoplayClickAt = Date.now();
+            try { btn.click(); } catch (e) { /* ignore */ }
+        }
+    }
+
+    let expandedVideoId = null;
+    function autoExpandDescription() {
+        if (!settings.ytAutoExpandDesc || location.pathname !== '/watch') return;
+        const vid = watchVideoId();
+        if (!vid || vid === expandedVideoId) return;
+        const expander = document.querySelector('ytd-text-inline-expander#description-inline-expander');
+        if (!expander) return;
+        if (expander.hasAttribute('is-expanded')) { expandedVideoId = vid; return; }
+        const btn = expander.querySelector('tp-yt-paper-button#expand, #expand');
+        if (btn && isVisible(btn)) {
+            expandedVideoId = vid;
+            try { btn.click(); } catch (e) { /* ignore */ }
+        }
+    }
+
+    /* ==================================================================
+     * 4b. Community data (opt-in): SponsorBlock skipping, DeArrow titles/
+     * thumbnails, Return YouTube Dislike counts. All lookups go through
+     * the background script (see background.js for API/licence notes).
+     * ================================================================== */
+    const SB_CATEGORIES = [
+        ['sponsor', 'sbSkipSponsor', 'sponsor'],
+        ['selfpromo', 'sbSkipSelfpromo', 'self-promo'],
+        ['interaction', 'sbSkipInteraction', 'interaction reminder'],
+        ['intro', 'sbSkipIntro', 'intro'],
+        ['outro', 'sbSkipOutro', 'outro'],
+        ['preview', 'sbSkipPreview', 'preview'],
+        ['music_offtopic', 'sbSkipOfftopic', 'non-music section'],
+        ['filler', 'sbSkipFiller', 'filler']
+    ];
+    let sbState = { vid: null, segments: null, pending: false };
+    let sbLastSkipAt = 0;
+
+    function sbWantedCategories() {
+        return SB_CATEGORIES.filter(([, key]) => settings[key]).map(([cat]) => cat);
+    }
+
+    function sbLabel(cat) {
+        const hit = SB_CATEGORIES.find(([c]) => c === cat);
+        return hit ? hit[2] : cat;
+    }
+
+    function ensureSbHook(v) {
+        if (v.dataset.ytbSbHook === INSTANCE_ID) return;
+        v.dataset.ytbSbHook = INSTANCE_ID;
+        v.addEventListener('timeupdate', () => {
+            if (retired || !settings.enabled || !settings.sbEnabled || v.paused) return;
+            if (sbState.vid !== watchVideoId()) return;
+            const segs = sbState.segments;
+            if (!segs || !segs.length) return;
+            if (Date.now() - sbLastSkipAt < 500) return;   // let the seek land
+            const t = v.currentTime;
+            for (const s of segs) {
+                if (t >= s.start && t < s.end - 0.3) {
+                    sbLastSkipAt = Date.now();
+                    try { v.currentTime = s.end; } catch (e) { return; }
+                    showVolumeOverlay('⏭ skipped ' + sbLabel(s.category));
+                    break;
+                }
+            }
+        });
+    }
+
+    function ensureSponsorBlock() {
+        if (!settings.sbEnabled || location.pathname !== '/watch') return;
+        const vid = watchVideoId();
+        if (!vid) return;
+        if (sbState.vid !== vid && !sbState.pending) {
+            const cats = sbWantedCategories();
+            if (!cats.length) return;
+            sbState = { vid, segments: null, pending: true };
+            api.runtime.sendMessage({ action: 'ytb-sb-segments', videoId: vid, categories: cats })
+                .then((segs) => {
+                    if (sbState.vid !== vid) return;
+                    sbState = { vid, segments: segs || [], pending: false };
+                    if (segs && segs.length) {
+                        showVolumeOverlay('⏭ ' + segs.length +
+                            (segs.length === 1 ? ' segment' : ' segments') + ' will be skipped');
+                        updateSbMarkers();
+                    }
+                })
+                .catch(() => {
+                    if (sbState.vid === vid) sbState = { vid, segments: [], pending: false };
+                });
+        }
+        const v = playerVideo();
+        if (v) ensureSbHook(v);
+    }
+
+    // Colored segment markers on the player's progress bar (the visual cue
+    // SponsorBlock users expect), roughly matching SB's category colors.
+    const SB_COLORS = {
+        sponsor: '#00d400', selfpromo: '#ffff00', interaction: '#cc00ff',
+        intro: '#00ffff', outro: '#0202ed', preview: '#008fd6',
+        music_offtopic: '#ff9900', filler: '#7300ff'
+    };
+
+    function updateSbMarkers() {
+        const bar = document.querySelector('#movie_player .ytp-progress-bar');
+        let wrap = document.getElementById('ytb-sb-markers');
+        const v = playerVideo();
+        const want = settings.enabled && settings.sbEnabled && bar && v &&
+            isFinite(v.duration) && v.duration > 0 &&
+            sbState.vid === watchVideoId() &&
+            sbState.segments && sbState.segments.length;
+        if (!want) {
+            if (wrap) wrap.remove();
+            return;
+        }
+        if (wrap && (wrap.parentElement !== bar || wrap.dataset.vid !== sbState.vid)) {
+            wrap.remove();
+            wrap = null;
+        }
+        if (wrap) return;
+        wrap = document.createElement('div');
+        wrap.id = 'ytb-sb-markers';
+        wrap.dataset.vid = sbState.vid;
+        const dur = v.duration;
+        for (const s of sbState.segments) {
+            const d = document.createElement('div');
+            d.className = 'ytb-sb-marker';
+            d.style.left = (100 * s.start / dur) + '%';
+            d.style.width = Math.max(0.3, 100 * (s.end - s.start) / dur) + '%';
+            d.style.background = SB_COLORS[s.category] || '#00d400';
+            d.title = sbLabel(s.category);
+            wrap.appendChild(d);
+        }
+        bar.appendChild(wrap);
+    }
+
+    /* ---- DeArrow: community titles (and optionally thumbnails) -------- */
+    const deCache = new Map();          // vid -> {title, thumbTime} | 'pending'
+    const DE_CACHE_MAX = 800;
+
+    function deLookup(vid) {
+        if (deCache.size >= DE_CACHE_MAX) deCache.delete(deCache.keys().next().value);
+        deCache.set(vid, 'pending');
+        api.runtime.sendMessage({ action: 'ytb-de-branding', videoId: vid })
+            .then((res) => deCache.set(vid, res || {}))
+            .catch(() => deCache.set(vid, {}));
+    }
+
+    function deTitleTarget(node) {
+        return node.querySelector(
+            '#video-title, a#video-title-link, ' +
+            '[class*="lockupMetadataViewModelTitle" i], h3 a[title], h3, h4'
+        );
+    }
+
+    function applyDeArrowToTile(tile, vid, entry) {
+        tile.dataset.ytbDe = vid;
+        if (settings.deArrowTitles && entry.title) {
+            const el = deTitleTarget(tile);
+            if (el) {
+                const target = el.querySelector('yt-formatted-string') || el;
+                target.textContent = entry.title;
+                if (el.getAttribute && el.getAttribute('title') != null) el.setAttribute('title', entry.title);
+            }
+        }
+        if (settings.deArrowThumbs && entry.thumbTime != null) {
+            const img = tile.querySelector('ytd-thumbnail img, yt-image img, img.yt-core-image, img');
+            if (img && img.src && !img.dataset.ytbDeThumb) {
+                img.dataset.ytbDeThumb = '1';
+                const orig = img.src;
+                img.addEventListener('error', () => { img.src = orig; }, { once: true });
+                img.src = 'https://dearrow-thumb.ajay.app/api/v1/getThumbnail?videoID=' +
+                          encodeURIComponent(vid) + '&time=' + entry.thumbTime;
+            }
+        }
+    }
+
+    function processDeArrow() {
+        if (!settings.deArrowTitles && !settings.deArrowThumbs) return;
+        let dispatched = 0;
+        for (const tile of document.querySelectorAll(INNER_CONTAINERS)) {
+            if (tile.classList.contains('ytb-removed')) continue;
+            const vid = getVideoIdFromNode(tile);
+            if (!vid) continue;
+            const entry = deCache.get(vid);
+            if (entry === undefined) {
+                // Trickle the lookups so a big feed doesn't burst the API.
+                if (dispatched < 6) { dispatched++; deLookup(vid); }
+                continue;
+            }
+            if (entry === 'pending' || (!entry.title && entry.thumbTime == null)) continue;
+            if (tile.dataset.ytbDe === vid) continue;
+            applyDeArrowToTile(tile, vid, entry);
+        }
+        // Watch-page title.
+        if (settings.deArrowTitles && location.pathname === '/watch') {
+            const vid = watchVideoId();
+            const entry = vid && deCache.get(vid);
+            if (vid && entry === undefined) { deLookup(vid); return; }
+            if (!entry || entry === 'pending' || !entry.title) return;
+            const h1 = document.querySelector('ytd-watch-metadata h1 yt-formatted-string, h1.ytd-watch-metadata');
+            if (h1 && h1.dataset.ytbDe !== vid) {
+                h1.dataset.ytbDe = vid;
+                h1.textContent = entry.title;
+            }
+        }
+    }
+
+    /* ---- Return YouTube Dislike ---------------------------------------- */
+    function formatCount(n) {
+        if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+        if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+        if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+        return String(n);
+    }
+
+    // Only the watch page's action-bar dislike buttons: the same view-model
+    // is also used for comment dislikes, and YouTube keeps several hidden
+    // sizing variants of the action bar around, so patch every match in the
+    // metadata area (hidden ones are harmless, whichever shows carries it).
+    function dislikeButtons() {
+        // Everything scoped to ytd-watch-metadata: the same view-models and
+        // the legacy #dislike-button id are ALSO used by comment toolbars
+        // (verified live 2026-07 — an unscoped selector stamped the video's
+        // count onto every comment).
+        return [...document.querySelectorAll(
+            'ytd-watch-metadata dislike-button-view-model button, ' +
+            'ytd-watch-metadata #segmented-dislike-button button, ' +
+            'ytd-watch-metadata ytd-toggle-button-renderer#dislike-button button'
+        )];
+    }
+
+    function applyRydTo(b, vid, res) {
+        b.dataset.ytbRyd = vid;
+        const label = formatCount(res.dislikes);
+        const txt = b.querySelector('.yt-spec-button-shape-next__button-text-content');
+        if (txt) {
+            txt.textContent = label;
+        } else {
+            // Icon-only button: append a count and widen it. YouTube pins the
+            // button AND its view-model wrappers to a fixed width with
+            // higher-specificity !important rules, so inline styles it is
+            // (verified live 2026-07: stylesheet width:auto!important lost).
+            let span = b.querySelector('.ytb-ryd-count');
+            if (!span) {
+                span = document.createElement('span');
+                span.className = 'ytb-ryd-count';
+                b.appendChild(span);
+            }
+            span.textContent = label;
+            b.classList.add('ytb-ryd-btn');
+            b.style.setProperty('padding-right', '16px', 'important');
+            const stop = b.closest('segmented-like-dislike-button-view-model');
+            let el = b;
+            while (el && stop && el !== stop) {
+                el.style.setProperty('width', 'auto', 'important');
+                el = el.parentElement;
+            }
+            if (!stop) b.style.setProperty('width', 'auto', 'important');
+        }
+        b.title = res.dislikes.toLocaleString() + ' dislikes — Return YouTube Dislike';
+    }
+
+    let rydPendingVid = null;
+    function processRyd() {
+        if (!settings.rydEnabled || location.pathname !== '/watch') return;
+        const vid = watchVideoId();
+        if (!vid || rydPendingVid === vid) return;
+        const btns = dislikeButtons();
+        if (!btns.length || btns.every(b => b.dataset.ytbRyd === vid)) return;
+        rydPendingVid = vid;
+        api.runtime.sendMessage({ action: 'ytb-ryd-votes', videoId: vid }).then((res) => {
+            rydPendingVid = null;
+            if (!res || res.dislikes == null || watchVideoId() !== vid) return;
+            dislikeButtons().forEach(b => applyRydTo(b, vid, res));
+        }).catch(() => { rydPendingVid = null; });
+    }
+
     // Merge any identifiers found on the current page into a matching block
     // entry, so a block made with only one identifier (e.g. an @handle) learns
     // the others (name, UC id) and starts matching every surface.
@@ -856,6 +1358,9 @@
                 if (boostGain) boostGain.gain.value = 1;
                 const slider = document.getElementById('ytb-boost-slider');
                 if (slider) slider.remove();
+                document.querySelectorAll('.ytb-cinema-btn, .ytb-extra-btn').forEach(b => b.remove());
+                clearLoop();
+                exitCinema();
                 return;
             }
             // flattenRows() intentionally not called: physically moving every
@@ -865,6 +1370,7 @@
             if (settings.blockShorts || settings.hideNewsShelves) removeRichSections();
             if (settings.hidePromos) removeNonVideoCards();
             if (settings.hideMixes || settings.hidePlaylists) removeMixesAndPlaylists();
+            if (settings.hideMembersOnly) removeMembersOnly();
             if (settings.hideWatched && watchedAllowedHere()) {
                 processWatchedByProgressBar();
                 processWatchedByContainer();
@@ -875,6 +1381,7 @@
             enrichFromCurrentPage(pageInfo);   // learn missing identifiers, rebuild index if changed
             processTiles();                    // then hide tiles using the enriched index
             processEndScreen();                // and the in-player end-screen suggestions
+            processComments();                 // comment keyword filtering (watch pages)
             // Menu scanning is expensive (*[role="menuitem"]); only do it shortly
             // after a press, when a menu may actually have opened.
             if (Date.now() - lastPointerDown < 3000) injectBlockChannelMenuItem();
@@ -883,6 +1390,16 @@
             applyVolumeBoost();
             ensureWheelListener();
             ensureBoostSlider();
+            ensureCinemaButton();
+            ensureExtraButtons();
+            applyDefaultSpeed();
+            preventIdlePause();
+            enforceAutoplayOff();
+            autoExpandDescription();
+            ensureSponsorBlock();
+            updateSbMarkers();
+            processDeArrow();
+            processRyd();
         } catch (e) {
             console.warn('[YT Blocker] pass error:', e);
         } finally {
@@ -971,7 +1488,12 @@
         'ytd-menu-navigation-item-renderer',
         'yt-list-item-view-model',
         'tp-yt-paper-item',
-        '*[role="menuitem"]'
+        '*[role="menuitem"]',
+        // m.youtube.com bottom-sheet menu entries
+        'ytm-menu-service-item-renderer',
+        'ytm-menu-navigation-item-renderer',
+        'button.menu-item-button',
+        '*[role="option"]'
     ].join(',');
 
     // "Don't recommend channel" in YouTube's most common UI languages — used
@@ -1027,11 +1549,17 @@
         // Non-English UIs won't match the English signal strings. If the menu
         // was opened from a tile's 3-dot button (menuOwnerTile), any visible
         // popup menu is the video menu, so anchor on its last item instead.
+        // Desktop menus live in ytd-popup-container; mobile ones in a
+        // bottom-sheet container.
         if (!anchor && menuOwnerTile) {
-            const popupItems = document.querySelectorAll('ytd-popup-container ' + MENU_ITEM_SELECTOR.split(',').join(',ytd-popup-container '));
-            for (const it of popupItems) {
-                if (it.classList && it.classList.contains('ytb-menu-item')) continue;
-                if (isVisible(it) && (it.textContent || '').trim()) anchor = it;
+            const roots = document.querySelectorAll(
+                'ytd-popup-container, bottom-sheet-container, .bottom-sheet-container, ytm-menu-popup-renderer'
+            );
+            for (const root of roots) {
+                for (const it of root.querySelectorAll(MENU_ITEM_SELECTOR)) {
+                    if (it.classList && it.classList.contains('ytb-menu-item')) continue;
+                    if (isVisible(it) && (it.textContent || '').trim()) anchor = it;
+                }
             }
         }
         if (!anchor || !anchor.parentNode) return null;
@@ -1043,6 +1571,9 @@
             const dd = document.querySelector('ytd-popup-container tp-yt-iron-dropdown');
             if (dd && typeof dd.close === 'function') { dd.close(); return; }
         } catch (e) { /* fall through */ }
+        // Mobile bottom sheet: tapping the dimmed backdrop closes it.
+        const overlay = document.querySelector('c3-overlay, .c3-overlay, .bottom-sheet-overlay');
+        if (overlay && isVisible(overlay)) { overlay.click(); return; }
         document.body.dispatchEvent(new KeyboardEvent('keydown', {
             key: 'Escape', keyCode: 27, which: 27, bubbles: true
         }));
@@ -1227,14 +1758,16 @@
         blackoutActive = true;
         stopPlayback();
         if (hit.type === 'watch') {
-            const flexy = document.querySelector('ytd-watch-flexy');
+            // Desktop watch page, or the single-column m.youtube.com one.
+            const flexy = document.querySelector('ytd-watch-flexy') ||
+                          document.querySelector('ytm-watch');
             if (flexy) flexy.classList.add('ytb-blackout');
             const primaryInner = document.querySelector('ytd-watch-flexy #primary-inner') ||
                                  document.querySelector('#primary-inner');
             placePanel(primaryInner || flexy || document.body, hit.info, true);
         } else {
             const browse = document.querySelector('ytd-browse[page-subtype="channels"]') ||
-                           document.querySelector('ytd-browse');
+                           document.querySelector('ytd-browse, ytm-browse');
             if (browse) browse.classList.add('ytb-blackout');
             placePanel(browse || document.querySelector('#page-manager') || document.body, hit.info, true);
         }
@@ -1291,7 +1824,29 @@
      *     it). createMediaElementSource can run once per element; YouTube reuses
      *     one <video>, so the graph persists across navigations.
      * ================================================================== */
-    let audioCtx = null, boostGain = null;
+    let audioCtx = null, boostGain = null, boostSrc = null, compNode = null;
+
+    // Audio compressor (FFZ-style leveller): evens out quiet dialogue and
+    // loud passages. Sits between the media source and the boost gain.
+    function rewireBoostChain() {
+        if (!boostSrc || !boostGain) return;
+        try { boostSrc.disconnect(); } catch (e) { /* ignore */ }
+        if (compNode) { try { compNode.disconnect(); } catch (e) { /* ignore */ } }
+        if (settings.ytCompressorOn) {
+            if (!compNode) {
+                compNode = audioCtx.createDynamicsCompressor();
+                compNode.threshold.value = -50;
+                compNode.knee.value = 40;
+                compNode.ratio.value = 12;
+                compNode.attack.value = 0;
+                compNode.release.value = 0.25;
+            }
+            boostSrc.connect(compNode);
+            compNode.connect(boostGain);
+        } else {
+            boostSrc.connect(boostGain);
+        }
+    }
 
     function ensureBoostGraph() {
         const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
@@ -1303,9 +1858,9 @@
             const AC = window.AudioContext || window.webkitAudioContext;
             if (!AC) return false;
             if (!audioCtx) audioCtx = new AC();
-            const src = audioCtx.createMediaElementSource(v);
+            boostSrc = audioCtx.createMediaElementSource(v);
             boostGain = audioCtx.createGain();
-            src.connect(boostGain);
+            rewireBoostChain();
             boostGain.connect(audioCtx.destination);
             v.dataset.ytbBoostWired = INSTANCE_ID;
             return true;
@@ -1475,6 +2030,314 @@
     }
 
     /* ==================================================================
+     * 5c. Cinema mode: a ◐ button in the player's right controls darkens
+     * everything around the player. Esc or clicking the dark area exits.
+     * Implemented as four dark strips laid around the player's rectangle
+     * (geometry inline, tracked while active) — raising the player above
+     * one overlay fails whenever an ancestor creates a stacking context.
+     * ================================================================== */
+    let cinemaTimer = null;
+
+    function cinemaEscHandler(e) {
+        if (e.key === 'Escape') exitCinema();
+    }
+
+    function updateCinema() {
+        const wrap = document.getElementById('ytb-dim');
+        if (!wrap) return;
+        const p = document.getElementById('movie_player');
+        if (!p || !p.isConnected) { exitCinema(); return; }
+        const r = p.getBoundingClientRect();
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const t = Math.max(0, r.top), b = Math.min(vh, r.bottom);
+        const l = Math.max(0, r.left), rt = Math.min(vw, r.right);
+        const [top, bottom, left, right] = wrap.children;
+        top.style.cssText = 'left:0;top:0;width:100%;height:' + t + 'px;';
+        bottom.style.cssText = 'left:0;top:' + b + 'px;width:100%;height:' + Math.max(0, vh - b) + 'px;';
+        left.style.cssText = 'left:0;top:' + t + 'px;width:' + l + 'px;height:' + Math.max(0, b - t) + 'px;';
+        right.style.cssText = 'left:' + rt + 'px;top:' + t + 'px;width:' + Math.max(0, vw - rt) + 'px;height:' + Math.max(0, b - t) + 'px;';
+    }
+
+    function exitCinema() {
+        const wrap = document.getElementById('ytb-dim');
+        if (wrap) wrap.remove();
+        clearInterval(cinemaTimer);
+        cinemaTimer = null;
+        window.removeEventListener('resize', updateCinema);
+        document.removeEventListener('scroll', updateCinema, true);
+        document.removeEventListener('keydown', cinemaEscHandler, true);
+    }
+
+    function toggleCinema() {
+        if (document.getElementById('ytb-dim')) { exitCinema(); return; }
+        if (!document.getElementById('movie_player') || !document.body) return;
+        const wrap = document.createElement('div');
+        wrap.id = 'ytb-dim';
+        for (let i = 0; i < 4; i++) wrap.appendChild(document.createElement('div'));
+        wrap.addEventListener('click', exitCinema);
+        document.body.appendChild(wrap);
+        updateCinema();
+        cinemaTimer = setInterval(updateCinema, 250);
+        window.addEventListener('resize', updateCinema);
+        document.addEventListener('scroll', updateCinema, true);
+        document.addEventListener('keydown', cinemaEscHandler, true);
+    }
+
+    function ensureCinemaButton() {
+        let existing = document.querySelector('.ytb-cinema-btn');
+        if (existing && existing.dataset.ytbOwner !== INSTANCE_ID) {
+            existing.remove();
+            existing = null;
+        }
+        if (location.pathname !== '/watch' || !settings.ytCinemaButton) {
+            if (existing) existing.remove();
+            if (location.pathname !== '/watch') exitCinema();
+            return;
+        }
+        // Desktop player only — the m.youtube.com player has no ytp controls.
+        const controls = document.querySelector('#movie_player .ytp-right-controls');
+        if (!controls) return;
+        if (existing && controls.contains(existing)) return;
+        if (existing) existing.remove();
+        const btn = document.createElement('button');
+        btn.className = 'ytp-button ytb-cinema-btn';
+        btn.dataset.ytbOwner = INSTANCE_ID;
+        btn.title = 'Cinema mode — darken everything around the player (Esc to exit)';
+        btn.textContent = '◐';
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleCinema();
+        });
+        controls.insertBefore(btn, controls.firstChild);
+    }
+
+    /* ==================================================================
+     * 5f. Playback speed suite: default speed per new video, optional
+     * per-channel memory, and [ ] \ hotkeys. Live streams are skipped.
+     * ================================================================== */
+    let lastSpeedVideoId = null;
+    let speedTries = 0;
+    let speedSaveTimer = null;
+
+    function isLivePlayer() {
+        const p = document.getElementById('movie_player');
+        return !!(p && p.classList.contains('ytp-live'));
+    }
+
+    function channelSpeedKey(info) {
+        if (!info) return null;
+        if (info.handle) return '@' + info.handle.toLowerCase();
+        if (info.channelId) return info.channelId;
+        if (info.name) return info.name.toLowerCase().trim();
+        return null;
+    }
+
+    function setPlaybackRate(v, rate) {
+        try {
+            // Within the range YouTube's own API accepts, go through it so the
+            // player UI stays in sync; the element rate covers the rest. On
+            // Chromium the player API is out of reach, so page-quality.js
+            // makes the call from the page world instead.
+            const p = document.getElementById('movie_player');
+            const pApi = p && (p.wrappedJSObject || p);
+            if (rate >= 0.25 && rate <= 2) {
+                if (pApi && typeof pApi.setPlaybackRate === 'function') pApi.setPlaybackRate(rate);
+                else window.postMessage({ type: 'ytb-set-rate', rate }, location.origin);
+            }
+        } catch (e) { /* element rate below still applies */ }
+        try { v.playbackRate = rate; } catch (e) { /* ignore */ }
+    }
+
+    function fmtClock(s) {
+        s = Math.max(0, Math.floor(s));
+        return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    }
+
+    function applyDefaultSpeed() {
+        const vid = watchVideoId();
+        if (!vid || vid === lastSpeedVideoId) return;
+        const v = playerVideo();
+        if (!v || v.readyState < 1) return;   // metadata not there yet
+        if (isLivePlayer()) { lastSpeedVideoId = vid; return; }
+        let target = settings.ytSpeedDefault || 1;
+        if (settings.ytSpeedPerChannel) {
+            const key = channelSpeedKey(getWatchPageOwnerInfo());
+            // The owner byline can render after the video; retry a few passes
+            // before falling back to the default speed.
+            if (!key && speedTries < 10) { speedTries++; return; }
+            if (key && state.ytChannelSpeeds[key]) target = state.ytChannelSpeeds[key];
+        }
+        lastSpeedVideoId = vid;
+        speedTries = 0;
+        if (target !== 1) setPlaybackRate(v, target);
+    }
+
+    function rememberChannelSpeed(rate) {
+        if (!settings.ytSpeedPerChannel || location.pathname !== '/watch') return;
+        const key = channelSpeedKey(getWatchPageOwnerInfo());
+        if (!key) return;
+        if (rate === 1) delete state.ytChannelSpeeds[key];
+        else state.ytChannelSpeeds[key] = rate;
+        clearTimeout(speedSaveTimer);
+        speedSaveTimer = setTimeout(saveOnly, 800);
+    }
+
+    function setSpeedTo(rate) {
+        const v = playerVideo();
+        if (!v) return;
+        rate = Math.min(8, Math.max(0.1, Math.round(rate * 100) / 100));
+        setPlaybackRate(v, rate);
+        showVolumeOverlay('⏩ ' + rate + '×');
+        rememberChannelSpeed(rate);
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (retired || !settings.enabled || !settings.ytSpeedHotkeys) return;
+        if (e.ctrlKey || e.altKey || e.metaKey) return;
+        if (e.key !== '[' && e.key !== ']' && e.key !== '\\') return;
+        const t = e.target;
+        if (t && (t.isContentEditable || /^(input|textarea|select)$/i.test(t.tagName || ''))) return;
+        if (location.pathname !== '/watch') return;
+        const v = playerVideo();
+        if (!v) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === '\\') setSpeedTo(1);
+        else setSpeedTo((v.playbackRate || 1) + (e.key === ']' ? 0.25 : -0.25));
+    }, true);
+
+    /* ==================================================================
+     * 5g. Extra player buttons: compressor, A-B loop, screenshot.
+     * Same lifecycle rules as the cinema button (owner-tagged, rebuilt
+     * after an in-place update, removed when their toggle is off).
+     * ================================================================== */
+    function ensurePlayerButton(cls, want, title, glyph, onClick) {
+        let btn = document.querySelector('.' + cls);
+        if (btn && btn.dataset.ytbOwner !== INSTANCE_ID) { btn.remove(); btn = null; }
+        if (location.pathname !== '/watch' || !want) {
+            if (btn) btn.remove();
+            return null;
+        }
+        const controls = document.querySelector('#movie_player .ytp-right-controls');
+        if (!controls) return null;
+        if (btn && controls.contains(btn)) return btn;
+        if (btn) btn.remove();
+        btn = document.createElement('button');
+        btn.className = 'ytp-button ytb-extra-btn ' + cls;
+        btn.dataset.ytbOwner = INSTANCE_ID;
+        btn.title = title;
+        btn.textContent = glyph;
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onClick(btn);
+        });
+        controls.insertBefore(btn, controls.firstChild);
+        return btn;
+    }
+
+    function onCompClick(btn) {
+        const next = !settings.ytCompressorOn;
+        settings.ytCompressorOn = next;
+        state.settings.ytCompressorOn = next;
+        if (next && !ensureBoostGraph()) {
+            settings.ytCompressorOn = false;
+            state.settings.ytCompressorOn = false;
+            toast('Compressor unavailable — reload the page if the addon just updated.');
+            return;
+        }
+        rewireBoostChain();
+        saveOnly();
+        if (btn) btn.classList.toggle('ytb-on', next);
+        showVolumeOverlay(next ? '🎚 comp on' : '🎚 comp off');
+    }
+
+    /* ---- A-B loop ---- */
+    let loopState = { mode: 0, a: 0, b: 0, vid: null };   // 0 off, 1 A set, 2 looping
+
+    function clearLoop() {
+        loopState = { mode: 0, a: 0, b: 0, vid: null };
+    }
+
+    function ensureLoopHook(v) {
+        if (v.dataset.ytbLoopHook === INSTANCE_ID) return;
+        v.dataset.ytbLoopHook = INSTANCE_ID;
+        v.addEventListener('timeupdate', () => {
+            if (retired || loopState.mode !== 2) return;
+            if (watchVideoId() !== loopState.vid) { clearLoop(); return; }
+            if (v.currentTime > loopState.b || v.currentTime < loopState.a - 1) {
+                try { v.currentTime = loopState.a; } catch (e) { /* ignore */ }
+            }
+        });
+    }
+
+    function onLoopClick(btn) {
+        const v = playerVideo();
+        if (!v) return;
+        if (loopState.mode === 0) {
+            loopState = { mode: 1, a: v.currentTime, b: 0, vid: watchVideoId() };
+            showVolumeOverlay('🔁 A = ' + fmtClock(loopState.a));
+        } else if (loopState.mode === 1) {
+            let a = loopState.a, b = v.currentTime;
+            if (b < a) { const t = a; a = b; b = t; }
+            if (b - a < 0.5) b = a + 0.5;
+            loopState = { mode: 2, a, b, vid: loopState.vid };
+            ensureLoopHook(v);
+            showVolumeOverlay('🔁 ' + fmtClock(a) + '–' + fmtClock(b));
+        } else {
+            clearLoop();
+            showVolumeOverlay('🔁 off');
+        }
+        if (btn) btn.classList.toggle('ytb-on', loopState.mode !== 0);
+    }
+
+    /* ---- screenshot ---- */
+    function onShotClick() {
+        const v = playerVideo();
+        if (!v || !v.videoWidth) { toast('No frame to capture yet.'); return; }
+        try {
+            const c = document.createElement('canvas');
+            c.width = v.videoWidth;
+            c.height = v.videoHeight;
+            c.getContext('2d').drawImage(v, 0, 0);
+            const title = (document.title || 'youtube')
+                .replace(/ - YouTube$/, '')
+                .replace(/[\\/:*?"<>|]+/g, '_')
+                .trim().slice(0, 80) || 'youtube';
+            const name = title + ' @' + fmtClock(v.currentTime).replace(':', 'm') + 's.png';
+            c.toBlob((blob) => {
+                if (!blob) { toast('Screenshot failed.'); return; }
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = name;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 5000);
+                showVolumeOverlay('📷 saved');
+            }, 'image/png');
+        } catch (e) {
+            toast('Screenshot failed.');
+        }
+    }
+
+    function ensureExtraButtons() {
+        // Loop dropped on navigation to another video.
+        if (loopState.vid && watchVideoId() !== loopState.vid) clearLoop();
+        const shot = ensurePlayerButton('ytb-shot-btn', settings.ytShotButton,
+            'Save a screenshot of the current frame (PNG)', '📷', onShotClick);
+        const loop = ensurePlayerButton('ytb-loop-btn', settings.ytLoopButton,
+            'A-B loop — 1st click sets the start, 2nd the end (loops), 3rd clears', '🔁', onLoopClick);
+        const comp = ensurePlayerButton('ytb-comp-btn', settings.ytCompressorButton,
+            'Audio compressor — evens out quiet dialogue and loud passages', '🎚', onCompClick);
+        if (comp) comp.classList.toggle('ytb-on', !!settings.ytCompressorOn);
+        if (loop) loop.classList.toggle('ytb-on', loopState.mode !== 0);
+        void shot;
+    }
+
+    /* ==================================================================
      * 6. Toast
      * ================================================================== */
     let toastTimer = null;
@@ -1552,15 +2415,20 @@
     document.addEventListener('pointerdown', (e) => {
         if (retired) return;
         lastPointerDown = Date.now();
-        // First user gesture: if a boost was persisted, wire the graph now (so
-        // the AudioContext can run rather than muting the element).
-        if ((settings.volumeBoost || 1) > 1 && !boostGain) { ensureBoostGraph(); applyVolumeBoost(); }
+        // First user gesture: if a boost or the compressor was persisted, wire
+        // the graph now (so the AudioContext can run rather than muting the
+        // element).
+        if (((settings.volumeBoost || 1) > 1 || settings.ytCompressorOn) && !boostGain) {
+            ensureBoostGraph();
+            applyVolumeBoost();
+        }
         if (!e.target.closest) return;
         const tile = e.target.closest(INNER_CONTAINERS);
         if (tile) {
             menuOwnerTile = tile;
             menuOwnerIsMain = false;
-        } else if (e.target.closest('ytd-watch-metadata, #above-the-fold')) {
+        } else if (e.target.closest('ytd-watch-metadata, #above-the-fold, ' +
+                                    'ytm-slim-video-metadata-section-renderer, ytm-slim-owner-renderer')) {
             menuOwnerTile = null;
             menuOwnerIsMain = true;
         }

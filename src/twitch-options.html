@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>YouTube/Twitch Enhancer — Twitch settings</title>
+    <link rel="stylesheet" href="ui.css">
+    <style>
+        :root { --accent: #9147ff; --accent-2: #bf94ff; }
+        body { max-width: 720px; margin: 0 auto; }
+        .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+        @media (max-width: 620px) { .twocol { grid-template-columns: 1fr; } }
+        .twocol .section { border-right: 1px solid var(--border); }
+        .twocol .section:last-child { border-right: none; }
+        .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+        .chip {
+            display: inline-flex; align-items: center; gap: 6px;
+            background: var(--panel-2); border: 1px solid var(--border);
+            border-radius: 999px; padding: 3px 6px 3px 12px; font-size: 12px;
+        }
+        .chip button { border: none; background: transparent; color: var(--accent-2);
+            padding: 0 4px; font-size: 13px; cursor: pointer; }
+        .footer { display: flex; justify-content: space-between; align-items: center;
+            padding: 12px 16px; color: var(--muted); font-size: 11px; }
+        button.primary:hover { background: #a970ff; }
+        .pill .n { color: var(--accent-2); }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <img src="../icons/icon.svg" alt="">
+        <div class="grow">
+            <h1>YouTube/Twitch Enhancer</h1>
+            <div class="sub">Twitch: blocked channels, categories, title keywords, and settings · <a href="options.html">YouTube settings →</a></div>
+        </div>
+        <label class="toggle" title="Master switch — turns every Twitch feature on or off">
+            <input type="checkbox" id="tw-enabled">
+            <span class="t-text"><b>Enabled</b></span>
+        </label>
+    </div>
+
+    <div class="section">
+        <h2>Block a channel</h2>
+        <div class="row">
+            <input type="text" id="ch-input" class="grow" placeholder="channel name or https://www.twitch.tv/channel">
+            <button class="primary" id="ch-btn">Block channel</button>
+        </div>
+        <div class="muted" style="margin-top:8px;font-size:11px;">
+            Tip: on twitch.tv you can right-click any stream card and choose <b>Block this Twitch channel</b>.
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Block a category</h2>
+        <div class="row">
+            <input type="text" id="cat-input" class="grow" placeholder='Category name (e.g. "Pools, Hot Tubs, and Beaches") or its directory URL'>
+            <button class="primary" id="cat-btn">Block category</button>
+        </div>
+        <div class="muted" style="margin-top:8px;font-size:11px;">
+            Blocking a category hides every stream in it — usually far more effective than blocking channels one by one.
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Blocked title keywords</h2>
+        <div class="row">
+            <input type="text" id="kw-input" class="grow" placeholder='Hide streams whose title contains… (or /regex/ for patterns)'>
+            <button class="primary" id="kw-btn">Add</button>
+        </div>
+        <div class="chips" id="kw-list"></div>
+    </div>
+
+    <div class="section">
+        <h2>Blocked tags</h2>
+        <div class="row">
+            <input type="text" id="tag-input" class="grow" placeholder='Tag name exactly as shown on stream cards (e.g. "Drops Enabled")'>
+            <button class="primary" id="tag-btn">Add</button>
+        </div>
+        <div class="chips" id="tag-list"></div>
+        <label class="toggle" style="margin-top:8px;">
+            <input type="checkbox" id="set-reruns">
+            <span class="t-text">Hide reruns<small>Hides streams badged "Rerun" everywhere.</small></span>
+        </label>
+    </div>
+
+    <div class="section">
+        <h2>Block lists</h2>
+        <div class="row">
+            <input type="text" id="filter-input" class="grow" placeholder="Search blocked channels / categories…">
+            <button id="rm-selected-btn" class="danger" title="Remove everything ticked below">Remove selected</button>
+        </div>
+    </div>
+    <div class="twocol">
+        <div class="section">
+            <h2>Blocked channels (<span id="ch-count">0</span>)</h2>
+            <div class="list" id="channel-list"></div>
+        </div>
+        <div class="section">
+            <h2>Blocked categories (<span id="cat-count">0</span>)</h2>
+            <div class="list" id="category-list"></div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Settings</h2>
+        <label class="toggle">
+            <input type="checkbox" id="set-autoclaim">
+            <span class="t-text">Auto-claim channel points<small>Clicks the bonus chest whenever it appears, including in background tabs. Chat must exist on the page (hiding chat with the toggle below is fine — it stays in the DOM).</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-drops">
+            <span class="t-text">Auto-claim drops<small>Clicks "Claim Now" on earned drops: the in-page callout while watching, and every claimable reward on the <a href="https://www.twitch.tv/drops/inventory" target="_blank" rel="noopener">drops inventory page</a> when you open it.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-moments">
+            <span class="t-text">Auto-claim Moments<small>Grabs collectible Moment badges the instant the claim callout appears in chat.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-anon">
+            <span class="t-text">Join chat anonymously<small>Connects to chat as an anonymous user so you never appear in the viewer list. Chat becomes read-only while this is on (points still accrue and auto-claim still works). Takes effect the next time a Twitch page loads.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-emotes">
+            <span class="t-text">Third-party emotes<small>Renders BetterTTV, FrankerFaceZ and 7TV emotes in chat (global + this channel's). Privacy note: emote lists are fetched from those three services, which see the channel you're watching.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-clipdl">
+            <span class="t-text">Clip download button<small>Adds a ⬇ Download button on clip pages (clips are plain MP4s).</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-cinema">
+            <span class="t-text">Cinema mode button<small>◐ button on the player darkens everything around the stream. Esc or clicking the dark area exits.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-carousel">
+            <span class="t-text">Hide the front-page carousel<small>Removes the auto-playing featured stream at the top of twitch.tv and pauses its video so it stops using bandwidth.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-hidechat">
+            <span class="t-text">Hide chat<small>Hides the chat column visually. Points and auto-claim keep working. Pop-out chat is untouched if you still want chat in its own window.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-cliphelper">
+            <span class="t-text">Clip helper<small>Adds a ➤ Share clip button to the player. Create a clip with Twitch's own Clip button (or Alt+X), publish it, then Share clip pastes the link into chat and sends it.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-maxquality">
+            <span class="t-text">Pin source quality<small>New streams start at the highest available quality instead of Auto. Turn off if your connection struggles.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-hideext">
+            <span class="t-text">Hide extension overlays<small>Removes streamer-installed extension panels, the overlay dock, and their notifications from the player.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-compbtn">
+            <span class="t-text">Audio compressor button<small>🎚 Comp button on the player: evens out quiet talkers and loud game audio (FFZ-style leveller). Its on/off state is remembered.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-shotbtn">
+            <span class="t-text">Screenshot button<small>📷 button on the player: saves the current frame as a PNG.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-speedkeys">
+            <span class="t-text">Speed hotkeys on VODs &amp; clips<small><b>[</b> slower, <b>]</b> faster (±0.25×), <b>\</b> back to 1×. Live streams are never touched.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-uptime">
+            <span class="t-text">Stream uptime<small>⏱ chip next to the viewer count showing how long the stream has been live (best-effort — read from the page itself, no extra requests).</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-previews">
+            <span class="t-text">Sidebar hover previews<small>Hovering a live channel in the left sidebar shows its current stream thumbnail.</small></span>
+        </label>
+    </div>
+
+    <div class="section">
+        <h2>Chat filters</h2>
+        <div class="muted" style="margin-bottom:10px;font-size:11px;">
+            Same syntax as the block keywords: plain words/phrases or <b>/regex/</b> patterns.
+        </div>
+        <div class="row">
+            <input type="text" id="hl-input" class="grow" placeholder='Highlight messages containing… (tinted background)'>
+            <button class="primary" id="hl-btn">Add</button>
+        </div>
+        <div class="chips" id="hl-list"></div>
+        <div class="row" style="margin-top:14px;">
+            <input type="text" id="cbw-input" class="grow" placeholder='Hide messages containing…'>
+            <button class="primary" id="cbw-btn">Add</button>
+        </div>
+        <div class="chips" id="cbw-list"></div>
+        <div class="row" style="margin-top:14px;">
+            <input type="text" id="cbu-input" class="grow" placeholder='Hide messages from user… (login name)'>
+            <button class="primary" id="cbu-btn">Add</button>
+        </div>
+        <div class="chips" id="cbu-list"></div>
+        <label class="toggle" style="margin-top:14px;">
+            <input type="checkbox" id="set-altshade">
+            <span class="t-text">Alternating line shading<small>Every second chat line gets a subtly different background — easier to follow in fast chats.</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-showdeleted">
+            <span class="t-text">Show deleted messages<small>Keeps moderator-deleted messages readable, struck through (best-effort; only messages seen before deletion can be restored).</small></span>
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="set-tabcomplete">
+            <span class="t-text">Emote tab-completion<small>Tab completes third-party emote names while typing in chat; Tab again cycles the matches. Needs "Third-party emotes" on.</small></span>
+        </label>
+    </div>
+
+    <div class="section">
+        <h2>Chat performance</h2>
+        <div class="muted" style="margin-bottom:10px;font-size:11px;">
+            For busy chats. Each slider's leftmost position (0) leaves Twitch's default behaviour untouched.
+        </div>
+        <div class="row">
+            <span class="grow">Line limit<br><small class="muted">Maximum chat lines kept on screen</small></span>
+            <input type="range" id="set-linelimit" min="0" max="500" step="25" style="width:160px;">
+            <span class="pill" style="min-width:64px;text-align:center;"><span class="n" id="linelimit-val">off</span></span>
+        </div>
+        <div class="row">
+            <span class="grow">Message batching<br><small class="muted">Reveal new messages together every N ms</small></span>
+            <input type="range" id="set-batchms" min="0" max="1000" step="50" style="width:160px;">
+            <span class="pill" style="min-width:64px;text-align:center;"><span class="n" id="batchms-val">off</span></span>
+        </div>
+        <div class="row">
+            <span class="grow">Smooth scroll<br><small class="muted">Slide new messages into view over N ms</small></span>
+            <input type="range" id="set-smoothms" min="0" max="500" step="25" style="width:160px;">
+            <span class="pill" style="min-width:64px;text-align:center;"><span class="n" id="smoothms-val">off</span></span>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Import / Export</h2>
+        <div class="btn-grid">
+            <button id="export-btn">⬇ Export to file</button>
+            <button id="import-btn">⬆ Import from file</button>
+            <button id="copy-btn">⧉ Copy JSON</button>
+            <button id="clear-btn" class="danger">🗑 Clear Twitch lists</button>
+        </div>
+        <input type="file" id="import-file" class="hidden-input" accept="application/json,.json">
+        <div class="status" id="status"></div>
+        <div class="muted" style="margin-top:10px;font-size:11px;">
+            Exports contain both the YouTube and Twitch lists in one file. Import merges (no duplicates).
+            "Clear" only empties the Twitch lists — YouTube data is untouched.
+        </div>
+    </div>
+
+    <div class="footer">
+        <a href="options.html">← YouTube settings</a>
+        <a class="kofi" href="https://ko-fi.com/carcer7378" target="_blank" rel="noopener"><span class="heart">♥</span> Support development on Ko-fi</a>
+    </div>
+
+    <script src="common.js"></script>
+    <script src="twitch-options.js"></script>
+</body>
+</html>
