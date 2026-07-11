@@ -231,6 +231,23 @@
             <label class="toggle"><input type="checkbox" id="set-sb-offtopic"><span class="t-text">Non-music sections</span></label>
             <label class="toggle"><input type="checkbox" id="set-sb-filler"><span class="t-text">Filler tangents</span></label>
         </div>
+        <label class="toggle" style="margin-top:6px;">
+            <input type="checkbox" id="set-sb-badges">
+            <span class="t-text">Shield badge on thumbnails with segments<small>Adds a small green SponsorBlock shield to the top-left of any video that already has community segments. Uses the same lookups as skipping.</small></span>
+        </label>
+        <div class="sb-whitelist" style="margin-top:10px;">
+            <div class="muted" style="font-size:11px;margin-bottom:6px;">
+                <b>Never skip on these channels.</b> Segment markers still show, but nothing is
+                auto-skipped (handy for creators you want to support). Add the channel you're watching
+                from the shield button on the player, or add one here.
+            </div>
+            <div class="row">
+                <input type="text" id="sb-wl-input" class="grow" spellcheck="false" autocomplete="off"
+                       placeholder="@handle, channel URL, UC… ID, or a channel name">
+                <button id="sb-wl-add">Add</button>
+            </div>
+            <div class="list" id="sb-wl-list" style="margin-top:8px;"></div>
+        </div>
         <label class="toggle">
             <input type="checkbox" id="set-de-titles">
             <span class="t-text">DeArrow: community titles<small>Replaces clickbait titles with community-submitted ones where they exist (tiles and the watch page).</small></span>

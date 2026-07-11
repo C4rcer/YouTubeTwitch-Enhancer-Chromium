@@ -56,9 +56,13 @@
         sbPreview: $('set-sb-preview'),
         sbOfftopic: $('set-sb-offtopic'),
         sbFiller: $('set-sb-filler'),
+        sbBadges: $('set-sb-badges'),
         deTitles: $('set-de-titles'),
         deThumbs: $('set-de-thumbs'),
         ryd: $('set-ryd'),
+        sbWlInput: $('sb-wl-input'),
+        sbWlAdd: $('sb-wl-add'),
+        sbWlList: $('sb-wl-list'),
         promos: $('set-promos'),
         mixes: $('set-mixes'),
         playlists: $('set-playlists'),
@@ -96,6 +100,7 @@
         renderVideos();
         renderKeywords();
         renderCommentKeywords();
+        renderWhitelist();
         els.enabled.checked = !!data.settings.enabled;
         els.shorts.checked = !!data.settings.blockShorts;
         els.watched.checked = !!data.settings.hideWatched;
@@ -129,6 +134,7 @@
         els.sbPreview.checked = !!data.settings.sbSkipPreview;
         els.sbOfftopic.checked = !!data.settings.sbSkipOfftopic;
         els.sbFiller.checked = !!data.settings.sbSkipFiller;
+        els.sbBadges.checked = !!data.settings.sbThumbnailBadges;
         els.deTitles.checked = !!data.settings.deArrowTitles;
         els.deThumbs.checked = !!data.settings.deArrowThumbs;
         els.ryd.checked = !!data.settings.rydEnabled;
@@ -216,6 +222,46 @@
             ));
         } else if (shown > MAX_ROWS) {
             els.channelList.appendChild(emptyRow('Showing first ' + MAX_ROWS + ' — use the search box to narrow down.'));
+        }
+    }
+
+    function renderWhitelist() {
+        if (!els.sbWlList) return;
+        els.sbWlList.textContent = '';
+        const list = (data.sbWhitelist || []).slice().sort(
+            (a, b) => YTB.channelLabel(a).toLowerCase().localeCompare(YTB.channelLabel(b).toLowerCase())
+        );
+        if (!list.length) {
+            els.sbWlList.appendChild(emptyRow('No whitelisted channels. SponsorBlock skips on every channel.'));
+            return;
+        }
+        for (const c of list) {
+            const item = document.createElement('div');
+            item.className = 'list-item';
+
+            const grow = document.createElement('div');
+            grow.className = 'grow';
+            const label = document.createElement('a');
+            label.className = 'label';
+            label.href = YTB.channelUrl(c);
+            label.target = '_blank';
+            label.rel = 'noopener';
+            label.textContent = YTB.channelLabel(c);
+            const meta = document.createElement('div');
+            meta.className = 'meta';
+            meta.textContent = [c.handle ? '@' + c.handle : '', c.channelId].filter(Boolean).join('  ·  ') || 'matched by name';
+            grow.appendChild(label);
+            grow.appendChild(meta);
+
+            const rm = document.createElement('button');
+            rm.className = 'icon danger';
+            rm.title = 'Remove from whitelist';
+            rm.textContent = '✕';
+            rm.addEventListener('click', () => removeWhitelist(c));
+
+            item.appendChild(grow);
+            item.appendChild(rm);
+            els.sbWlList.appendChild(item);
         }
     }
 
@@ -349,6 +395,24 @@
         status('Removed ' + YTB.channelLabel(c) + ' (reload YouTube to see its videos again).');
     }
 
+    async function addWhitelist() {
+        const info = YTB.parseChannelInput(els.sbWlInput.value);
+        if (!info) { status('Enter a channel handle, URL, ID, or name.', true); return; }
+        if (YTB.addWhitelistChannel(data, info)) {
+            await commit();
+            status('Whitelisted ' + YTB.channelLabel(info) + '. SponsorBlock won’t skip there.');
+            els.sbWlInput.value = '';
+        } else {
+            status('Already whitelisted.', true);
+        }
+    }
+
+    async function removeWhitelist(c) {
+        data.sbWhitelist = (data.sbWhitelist || []).filter(x => !YTB.sameChannel(x, c));
+        await commit();
+        status('Removed ' + YTB.channelLabel(c) + ' from the SponsorBlock whitelist.');
+    }
+
     async function removeVideo(id) {
         data.hiddenVideoIds = data.hiddenVideoIds.filter(x => x !== id);
         await commit();
@@ -400,6 +464,7 @@
         data.settings.sbSkipPreview = els.sbPreview.checked;
         data.settings.sbSkipOfftopic = els.sbOfftopic.checked;
         data.settings.sbSkipFiller = els.sbFiller.checked;
+        data.settings.sbThumbnailBadges = els.sbBadges.checked;
         data.settings.deArrowTitles = els.deTitles.checked;
         data.settings.deArrowThumbs = els.deThumbs.checked;
         data.settings.rydEnabled = els.ryd.checked;
@@ -454,6 +519,7 @@
         data.hiddenVideoIds = [];
         data.blockedKeywords = [];
         data.ytCommentKeywords = [];
+        data.sbWhitelist = [];
         await commit();
         status('Cleared the block list.');
     }
@@ -465,6 +531,8 @@
         els.kwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addKeyword(); });
         els.ckwBtn.addEventListener('click', addCommentKeyword);
         els.ckwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addCommentKeyword(); });
+        els.sbWlAdd.addEventListener('click', addWhitelist);
+        els.sbWlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addWhitelist(); });
         els.filterInput.addEventListener('input', () => {
             filterText = els.filterInput.value.trim().toLowerCase();
             renderChannels();
@@ -477,7 +545,7 @@
          els.speedkeys, els.speedchan, els.comp, els.loop, els.shot,
          els.nopause, els.noautoplay, els.expanddesc,
          els.sb, els.sbSponsor, els.sbSelfpromo, els.sbInteraction, els.sbIntro,
-         els.sbOutro, els.sbPreview, els.sbOfftopic, els.sbFiller,
+         els.sbOutro, els.sbPreview, els.sbOfftopic, els.sbFiller, els.sbBadges,
          els.deTitles, els.deThumbs, els.ryd,
          els.promos, els.mixes, els.playlists, els.members, els.news, els.spinner, els.endscreen,
          els.sync

@@ -115,6 +115,14 @@ html[data-ytb-reveal] .ytb-removed:hover {
     fill: #ffd24d;
     opacity: 1;
 }
+/* SponsorBlock shield turns green when the current video has community
+ * segments (mirrors the official extension's "this video has segments"
+ * cue). The panel-open amber state (.ytb-on) still wins so an open panel
+ * reads as active. */
+.ytb-sb-btn.ytb-sb-has:not(.ytb-on) svg path {
+    fill: #00d400;
+    opacity: 1;
+}
 
 /* Post-skip SponsorBlock notice with the Unskip escape hatch. */
 #ytb-sb-notice {
@@ -213,6 +221,20 @@ html[data-ytb-reveal] .ytb-removed:hover {
     opacity: 1;
     background: none;
 }
+#ytb-sb-panel .ytb-sbp-wl {
+    margin-bottom: 8px;
+}
+#ytb-sb-panel .ytb-sbp-wl button {
+    width: 100%;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#ytb-sb-panel .ytb-sbp-wl button.ytb-sbp-wl-on {
+    border-color: #00d400;
+    color: #7dffa0;
+}
 #ytb-sb-panel .ytb-sbp-seg {
     display: flex;
     align-items: center;
@@ -287,6 +309,34 @@ button.ytb-ryd-btn {
     font-size: 1.4rem;
     font-weight: 500;
     line-height: 1;
+}
+
+/* SponsorBlock "has segments" badge in the top-left of a video thumbnail
+ * (mirrors the official extension's thumbnail labels). */
+.ytb-sb-badge {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    z-index: 20;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+    border-radius: 4px;
+    pointer-events: none;
+}
+.ytb-sb-badge svg {
+    width: 15px;
+    height: 15px;
+    display: block;
+}
+.ytb-sb-badge-shield {
+    fill: #00d400;
+}
+.ytb-sb-badge-check {
+    fill: #fff;
 }
 
 /* SponsorBlock segment markers on the player progress bar. */

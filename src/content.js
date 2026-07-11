@@ -78,6 +78,7 @@
         sbSkipPreview: false,
         sbSkipOfftopic: false,
         sbSkipFiller: false,
+        sbThumbnailBadges: true,     // green shield on tiles that already have segments
         deArrowTitles: false,
         deArrowThumbs: false,
         rydEnabled: false
@@ -90,6 +91,7 @@
         blockedKeywords: [],
         ytCommentKeywords: [],
         ytChannelSpeeds: {},
+        sbWhitelist: [],
         settings: Object.assign({}, DEFAULT_SETTINGS)
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
@@ -97,6 +99,7 @@
     let keywordMatchers = [];   // compiled from state.blockedKeywords
     let commentMatchers = [];   // compiled from state.ytCommentKeywords
     let blockedIndex = { handles: new Set(), ids: new Set(), names: new Set() };
+    let sbWhitelistIndex = { handles: new Set(), ids: new Set(), names: new Set() };
     let configVersion = 0;
     let lastSerialized = '';          // guard against echoing our own writes
     let lastContextTarget = null;     // element under the last right-click
@@ -307,6 +310,9 @@
                 : [],
             blockedKeywords: cleanList(d.blockedKeywords),
             ytCommentKeywords: cleanList(d.ytCommentKeywords),
+            sbWhitelist: Array.isArray(d.sbWhitelist)
+                ? d.sbWhitelist.filter(c => c && (c.handle || c.channelId || c.name))
+                : [],
             ytChannelSpeeds: (d.ytChannelSpeeds && typeof d.ytChannelSpeeds === 'object' &&
                               !Array.isArray(d.ytChannelSpeeds))
                 ? Object.assign({}, d.ytChannelSpeeds)
@@ -347,6 +353,12 @@
             if (c.channelId) blockedIndex.ids.add(c.channelId);
             if (c.name) blockedIndex.names.add(c.name.toLowerCase().trim());
         }
+        sbWhitelistIndex = { handles: new Set(), ids: new Set(), names: new Set() };
+        for (const c of state.sbWhitelist) {
+            if (c.handle) sbWhitelistIndex.handles.add(c.handle.toLowerCase());
+            if (c.channelId) sbWhitelistIndex.ids.add(c.channelId);
+            if (c.name) sbWhitelistIndex.names.add(c.name.toLowerCase().trim());
+        }
         settings = Object.assign({}, DEFAULT_SETTINGS, state.settings);
         compileKeywords();
         const on = settings.enabled;
@@ -382,6 +394,7 @@
             full.blockedKeywords = state.blockedKeywords;
             full.ytCommentKeywords = state.ytCommentKeywords;
             full.ytChannelSpeeds = state.ytChannelSpeeds;
+            full.sbWhitelist = state.sbWhitelist;
             full.settings = Object.assign({}, full.settings, state.settings);
             lastSerialized = JSON.stringify(normalize(full));
             await api.storage.local.set({ [STORAGE_KEY]: full });
@@ -1090,6 +1103,60 @@
         return hit ? hit[2] : cat;
     }
 
+    // ---- SponsorBlock per-channel whitelist ----------------------------
+    // Whitelisted channels keep their segment markers but are never
+    // auto-skipped (mirrors the official extension). The current watch
+    // page's state is cached per video so the timeupdate hook stays cheap.
+    let sbWl = { vid: null, on: false };
+
+    function isSbWhitelisted(info) {
+        if (!info) return false;
+        if (info.channelId && sbWhitelistIndex.ids.has(info.channelId)) return true;
+        if (info.handle && sbWhitelistIndex.handles.has(info.handle.toLowerCase())) return true;
+        if (info.name) {
+            const n = info.name.toLowerCase().trim();
+            if (sbWhitelistIndex.names.has(n)) return true;
+            const compact = n.replace(/\s+/g, '');
+            if (compact.length >= 5 && sbWhitelistIndex.handles.has(compact)) return true;
+        }
+        return false;
+    }
+
+    function refreshSbWhitelist() {
+        const vid = watchVideoId();
+        if (location.pathname !== '/watch' || !vid) { sbWl = { vid: null, on: false }; return; }
+        sbWl = { vid, on: isSbWhitelisted(getWatchPageOwnerInfo()) };
+    }
+
+    function currentChannelWhitelisted() {
+        return sbWl.vid === watchVideoId() && sbWl.on;
+    }
+
+    // Add/remove the current watch-page channel from the whitelist (called
+    // from the shield panel's toggle).
+    function toggleSbWhitelist(info) {
+        if (!info || (!info.handle && !info.channelId && !info.name)) return;
+        const idx = state.sbWhitelist.findIndex(c => sameChannel(c, info));
+        if (idx >= 0) {
+            state.sbWhitelist.splice(idx, 1);
+            toast('Removed from SponsorBlock whitelist');
+        } else {
+            state.sbWhitelist.push({
+                name: info.name || '', handle: info.handle || '',
+                channelId: info.channelId || '', addedAt: Date.now()
+            });
+            toast('Channel whitelisted', 'segments stay, no auto-skip');
+        }
+        // persist() rebuilds the index and forces a segment refetch; the
+        // segments themselves don't change, so keep them shown to avoid a
+        // "looking up…" flash in the open panel.
+        const keepSb = sbState;
+        persist();
+        if (keepSb && keepSb.vid === watchVideoId() && keepSb.segments) sbState = keepSb;
+        refreshSbWhitelist();
+        renderSbPanel();
+    }
+
     function ensureSbHook(v) {
         if (v.dataset.ytbSbHook === INSTANCE_ID) return;
         v.dataset.ytbSbHook = INSTANCE_ID;
@@ -1108,6 +1175,7 @@
             if (sbState.vid !== watchVideoId()) return;
             const segs = sbState.segments;
             if (!segs || !segs.length) return;
+            if (currentChannelWhitelisted()) return;   // whitelisted: markers stay, no auto-skip
             if (Date.now() - sbLastSkipAt < 500) return;   // let the seek land
             const t = v.currentTime;
             for (const s of segs) {
@@ -1258,6 +1326,25 @@
         head.append(title, close);
         panel.appendChild(head);
 
+        // Per-channel whitelist toggle (segments stay visible; skipping off).
+        const ownerInfo = getWatchPageOwnerInfo();
+        if (ownerInfo && (ownerInfo.handle || ownerInfo.channelId || ownerInfo.name)) {
+            const wlRow = document.createElement('div');
+            wlRow.className = 'ytb-sbp-wl';
+            const wlOn = isSbWhitelisted(ownerInfo);
+            const who = ownerInfo.name || (ownerInfo.handle ? '@' + ownerInfo.handle : 'this channel');
+            const wlBtn = document.createElement('button');
+            wlBtn.type = 'button';
+            if (wlOn) wlBtn.className = 'ytb-sbp-wl-on';
+            wlBtn.textContent = (wlOn ? '✓ Whitelisted: ' : '⊘ Whitelist ') + who;
+            wlBtn.title = wlOn
+                ? 'Segments are shown but not skipped here. Click to auto-skip on this channel again.'
+                : 'Stop auto-skipping on this channel (segment markers stay visible).';
+            wlBtn.addEventListener('click', () => toggleSbWhitelist(ownerInfo));
+            wlRow.appendChild(wlBtn);
+            panel.appendChild(wlRow);
+        }
+
         // Existing segments, with voting.
         const segs = (sbState.vid === watchVideoId() && sbState.segments) || [];
         if (segs.length) {
@@ -1395,6 +1482,7 @@
         if (!settings.sbEnabled || location.pathname !== '/watch') return;
         const vid = watchVideoId();
         if (!vid) return;
+        refreshSbWhitelist();   // cache this channel's whitelist state for the skip hook
         if (sbState.vid !== vid && !sbState.pending) {
             const cats = sbWantedCategories();
             if (!cats.length) return;
@@ -1405,9 +1493,11 @@
                     sbState = { vid, segments: segs || [], pending: false };
                     if (segs && segs.length) {
                         showVolumeOverlay('⏭ ' + segs.length +
-                            (segs.length === 1 ? ' segment' : ' segments') + ' will be skipped');
+                            (segs.length === 1 ? ' segment' : ' segments') +
+                            (currentChannelWhitelisted() ? ' (whitelisted)' : ' will be skipped'));
                         updateSbMarkers();
                     }
+                    ensureExtraButtons();   // tint the shield green when segments exist
                     if (document.getElementById('ytb-sb-panel')) renderSbPanel();
                 })
                 .catch(() => {
@@ -1457,6 +1547,93 @@
             wrap.appendChild(d);
         }
         bar.appendChild(wrap);
+    }
+
+    /* ---- SponsorBlock thumbnail badges --------------------------------
+     * A small green shield in the top-left corner of any video tile whose
+     * video already has community segments (mirrors the official
+     * extension's thumbnail labels). Lookups reuse the k-anonymity segment
+     * endpoint through the background, trickled a few per pass and cached,
+     * so a busy feed does not burst the API.
+     * ------------------------------------------------------------------ */
+    const sbBadgeCache = new Map();     // vid -> true | false | 'pending'
+    const SB_BADGE_MAX = 1000;
+
+    function sbBadgeLookup(vid, cats) {
+        if (sbBadgeCache.size >= SB_BADGE_MAX) sbBadgeCache.delete(sbBadgeCache.keys().next().value);
+        sbBadgeCache.set(vid, 'pending');
+        api.runtime.sendMessage({ action: 'ytb-sb-segments', videoId: vid, categories: cats })
+            .then(segs => sbBadgeCache.set(vid, !!(segs && segs.length)))
+            .catch(() => sbBadgeCache.set(vid, false));
+    }
+
+    // The positioned box that hosts YouTube's own thumbnail overlays (the
+    // duration pill), so the badge sits over the image on every tile variant.
+    function sbBadgeContainer(tile) {
+        return tile.querySelector('ytd-thumbnail a#thumbnail') ||
+               tile.querySelector('a#thumbnail') ||
+               tile.querySelector('ytd-thumbnail') ||
+               tile.querySelector('yt-thumbnail-view-model, .ytThumbnailViewModelHost') ||
+               tile.querySelector('a[href*="/watch?v="]');
+    }
+
+    function makeSbBadge(vid) {
+        const badge = document.createElement('div');
+        badge.className = 'ytb-sb-badge';
+        badge.dataset.vid = vid;
+        badge.title = 'Has SponsorBlock segments';
+        const ns = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(ns, 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        const shield = document.createElementNS(ns, 'path');
+        shield.setAttribute('d', 'M12 2 4 5v6c0 4.8 3.4 9.1 8 10.2 4.6-1.1 8-5.4 8-10.2V5l-8-3Z');
+        shield.setAttribute('class', 'ytb-sb-badge-shield');
+        const check = document.createElementNS(ns, 'path');
+        check.setAttribute('d', 'M10.4 15.2 7.1 11.9l1.2-1.2 2.1 2.1 4.3-4.3 1.2 1.2z');
+        check.setAttribute('class', 'ytb-sb-badge-check');
+        svg.append(shield, check);
+        badge.appendChild(svg);
+        return badge;
+    }
+
+    function addSbBadge(container, vid) {
+        const existing = container.querySelector(':scope > .ytb-sb-badge');
+        if (existing) {
+            if (existing.dataset.vid === vid) return;   // already correct
+            existing.remove();                          // tile recycled to a new video
+        }
+        if (getComputedStyle(container).position === 'static') container.style.position = 'relative';
+        container.appendChild(makeSbBadge(vid));
+    }
+
+    function processSbBadges() {
+        if (!settings.enabled || !settings.sbEnabled || !settings.sbThumbnailBadges ||
+            !sbWantedCategories().length) {
+            if (document.querySelector('.ytb-sb-badge')) {
+                document.querySelectorAll('.ytb-sb-badge').forEach(b => b.remove());
+            }
+            return;
+        }
+        const cats = sbWantedCategories();
+        let dispatched = 0;
+        for (const tile of document.querySelectorAll(INNER_CONTAINERS)) {
+            if (tile.classList.contains('ytb-removed')) continue;
+            const vid = getVideoIdFromNode(tile);
+            if (!vid) continue;
+            const has = sbBadgeCache.get(vid);
+            if (has === undefined) {
+                if (dispatched < 6) { dispatched++; sbBadgeLookup(vid, cats); }
+                continue;
+            }
+            if (has === 'pending') continue;
+            const container = sbBadgeContainer(tile);
+            if (!container) continue;   // thumbnail not in the DOM yet; retry next pass
+            if (has) addSbBadge(container, vid);
+            else {
+                const ex = container.querySelector(':scope > .ytb-sb-badge');
+                if (ex) ex.remove();
+            }
+        }
     }
 
     /* ---- DeArrow: community titles (and optionally thumbnails) -------- */
@@ -1657,6 +1834,7 @@
                 const slider = document.getElementById('ytb-boost-slider');
                 if (slider) slider.remove();
                 document.querySelectorAll('.ytb-cinema-btn, .ytb-extra-btn').forEach(b => b.remove());
+                document.querySelectorAll('.ytb-sb-badge').forEach(b => b.remove());
                 clearLoop();
                 exitCinema();
                 return;
@@ -1696,6 +1874,7 @@
             autoExpandDescription();
             ensureSponsorBlock();
             updateSbMarkers();
+            processSbBadges();
             processDeArrow();
             processRyd();
         } catch (e) {
@@ -2683,7 +2862,17 @@
             'SponsorBlock — create a segment or vote on this video\'s segments', 'sb', onSbBtnClick);
         if (comp) comp.classList.toggle('ytb-on', !!settings.ytCompressorOn);
         if (loop) loop.classList.toggle('ytb-on', loopState.mode !== 0);
-        if (sbBtn) sbBtn.classList.toggle('ytb-on', !!document.getElementById('ytb-sb-panel'));
+        if (sbBtn) {
+            // Green shield when this video has community segments (the cue
+            // SponsorBlock users expect); amber while the panel is open.
+            const sbSegs = (sbState.vid === watchVideoId() && sbState.segments) || [];
+            sbBtn.classList.toggle('ytb-sb-has', sbSegs.length > 0);
+            sbBtn.classList.toggle('ytb-on', !!document.getElementById('ytb-sb-panel'));
+            sbBtn.title = sbSegs.length
+                ? ('SponsorBlock: ' + sbSegs.length + (sbSegs.length === 1 ? ' segment' : ' segments') +
+                   ' on this video' + (currentChannelWhitelisted() ? ' (channel whitelisted)' : ''))
+                : 'SponsorBlock — create a segment or vote on this video\'s segments';
+        }
         if (sbDraft && sbDraft.vid !== watchVideoId()) sbDraft = null;
         void shot;
     }

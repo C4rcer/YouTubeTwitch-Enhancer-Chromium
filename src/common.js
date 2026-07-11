@@ -56,6 +56,7 @@ const YTB = (function () {
         sbSkipPreview: false,
         sbSkipOfftopic: false,
         sbSkipFiller: false,
+        sbThumbnailBadges: true,     // green shield on tiles that already have segments
         deArrowTitles: false,        // DeArrow community titles
         deArrowThumbs: false,        // DeArrow thumbnails (heavier; their service renders them)
         rydEnabled: false,           // Return YouTube Dislike counts
@@ -154,6 +155,19 @@ const YTB = (function () {
                     }))
                 : [],
             blockedKeywords: cleanKeywords(d.blockedKeywords),
+            // Channels the user never wants SponsorBlock to auto-skip on
+            // (segments are still shown, just not skipped). Same shape as
+            // blockedChannels.
+            sbWhitelist: Array.isArray(d.sbWhitelist)
+                ? d.sbWhitelist
+                    .filter(c => c && (c.handle || c.channelId || c.name))
+                    .map(c => ({
+                        name: c.name || '',
+                        handle: c.handle || '',
+                        channelId: c.channelId || '',
+                        addedAt: c.addedAt || Date.now()
+                    }))
+                : [],
             twitchBlockedChannels: Array.isArray(d.twitchBlockedChannels)
                 ? d.twitchBlockedChannels
                     .filter(c => c && (c.login || c.name))
@@ -228,6 +242,20 @@ const YTB = (function () {
         if (!info || (!info.handle && !info.channelId && !info.name)) return false;
         if (data.blockedChannels.some(c => sameChannel(c, info))) return false;
         data.blockedChannels.push({
+            name: info.name || '',
+            handle: info.handle || '',
+            channelId: info.channelId || '',
+            addedAt: Date.now()
+        });
+        return true;
+    }
+
+    // Adds to data.sbWhitelist (mutates). Returns true if newly added.
+    function addWhitelistChannel(data, info) {
+        if (!info || (!info.handle && !info.channelId && !info.name)) return false;
+        if (!Array.isArray(data.sbWhitelist)) data.sbWhitelist = [];
+        if (data.sbWhitelist.some(c => sameChannel(c, info))) return false;
+        data.sbWhitelist.push({
             name: info.name || '',
             handle: info.handle || '',
             channelId: info.channelId || '',
@@ -347,6 +375,11 @@ const YTB = (function () {
             if (!kws.has(k)) { kws.add(k); addedKeywords++; }
         }
         out.blockedKeywords = [...kws];
+        // SponsorBlock whitelist: union by channel identity (not counted in
+        // the "channels" tally, which refers to blocked channels).
+        for (const c of inc.sbWhitelist) {
+            if (!out.sbWhitelist.some(x => sameChannel(x, c))) out.sbWhitelist.push(c);
+        }
         for (const c of inc.twitchBlockedChannels) {
             if (!out.twitchBlockedChannels.some(x => sameTwitchChannel(x, c))) {
                 out.twitchBlockedChannels.push(c);
@@ -389,7 +422,8 @@ const YTB = (function () {
     function isValidPayload(obj) {
         return obj && typeof obj === 'object' &&
             (Array.isArray(obj.blockedChannels) || Array.isArray(obj.hiddenVideoIds) ||
-             Array.isArray(obj.blockedKeywords) || Array.isArray(obj.twitchBlockedChannels) ||
+             Array.isArray(obj.blockedKeywords) || Array.isArray(obj.sbWhitelist) ||
+             Array.isArray(obj.twitchBlockedChannels) ||
              Array.isArray(obj.twitchBlockedCategories) || Array.isArray(obj.twitchBlockedKeywords) ||
              Array.isArray(obj.twitchBlockedTags) || Array.isArray(obj.twitchHighlightKeywords) ||
              Array.isArray(obj.twitchChatBlockKeywords) || Array.isArray(obj.twitchChatBlockUsers) ||
@@ -425,7 +459,7 @@ const YTB = (function () {
         DEFAULT_SETTINGS,
         normalize, clampThreshold, clampBoost, clampInt, clampSpeed, cleanKeywords,
         load, save, onChanged,
-        parseChannelInput, sameChannel, addChannel,
+        parseChannelInput, sameChannel, addChannel, addWhitelistChannel,
         channelLabel, channelUrl,
         parseTwitchChannelInput, parseTwitchCategoryInput, slugifyTwitchCategory,
         sameTwitchChannel, sameTwitchCategory, addTwitchChannel, addTwitchCategory,

@@ -86,6 +86,13 @@ the separate SponsorBlock / DeArrow / Return YouTube Dislike extensions:
   Submissions and votes carry a local SponsorBlock user ID, generated
   automatically. Migrating from the official SponsorBlock extension? Paste
   your user ID into the options page and your reputation carries over.
+- **SponsorBlock: whitelist channels & segment cues.** Whitelist any channel
+  (from the shield panel on the player, or the options page) so its segments
+  still show on the bar but are never auto-skipped, handy for creators you want
+  to support. Videos that already have community segments are flagged with a
+  small green shield: on the player's shield button, and as a badge in the
+  top-left of every thumbnail across YouTube (search, home, suggestions),
+  matching the official extension.
 - **DeArrow: community titles & thumbnails.** Replaces clickbait titles (and,
   via a separate heavier toggle, thumbnails) with community-submitted ones
   where they exist.
