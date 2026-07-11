@@ -1472,10 +1472,13 @@
     }
 
     function deTitleTarget(node) {
-        return node.querySelector(
-            '#video-title, a#video-title-link, ' +
-            '[class*="lockupMetadataViewModelTitle" i], h3 a[title], h3, h4'
-        );
+        // Query in priority tiers (querySelector returns document order, not
+        // selector order): the legacy #video-title, then the lockup title
+        // LINK. Never the bare h3 heading-reset wrapper — it computes to
+        // black, so writing text there leaves it dark and unreadable.
+        return node.querySelector('#video-title, a#video-title-link') ||
+               node.querySelector('a[class*="lockupMetadataViewModelTitle" i], [class*="lockupMetadataViewModelTitle" i]') ||
+               node.querySelector('h3 a[title], h4');
     }
 
     function applyDeArrowToTile(tile, vid, entry) {
@@ -1483,9 +1486,18 @@
         if (settings.deArrowTitles && entry.title) {
             const el = deTitleTarget(tile);
             if (el) {
-                const target = el.querySelector('yt-formatted-string') || el;
+                // Write to the innermost element that carries YouTube's text
+                // colour (the attributed-string span in the new lockup, or
+                // yt-formatted-string in legacy tiles). Writing to an outer
+                // wrapper strips the coloured child and leaves dark text.
+                const target = el.querySelector(
+                    '.yt-core-attributed-string, .ytAttributedStringHost, yt-formatted-string'
+                ) || el;
                 target.textContent = entry.title;
-                if (el.getAttribute && el.getAttribute('title') != null) el.setAttribute('title', entry.title);
+                const link = (el.matches && el.matches('a[title]')) ? el
+                    : (el.querySelector && el.querySelector('a[title]'));
+                if (link) link.setAttribute('title', entry.title);
+                else if (el.getAttribute && el.getAttribute('title') != null) el.setAttribute('title', entry.title);
             }
         }
         if (settings.deArrowThumbs && entry.thumbTime != null) {
@@ -1526,7 +1538,12 @@
             const h1 = document.querySelector('ytd-watch-metadata h1 yt-formatted-string, h1.ytd-watch-metadata');
             if (h1 && h1.dataset.ytbDe !== vid) {
                 h1.dataset.ytbDe = vid;
-                h1.textContent = entry.title;
+                // Same rule as tiles: write to the coloured inner element,
+                // not an outer wrapper, so the title stays readable.
+                const target = h1.querySelector(
+                    '.yt-core-attributed-string, .ytAttributedStringHost, yt-formatted-string'
+                ) || h1;
+                target.textContent = entry.title;
             }
         }
     }
