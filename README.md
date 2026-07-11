@@ -40,6 +40,8 @@ here.
 - **Hide individual videos**: right-click → **Hide this video**, or
   **Ctrl + right-click** for an instant hide.
 - **Hide members-only videos** (optional, off by default).
+- **Hide paid videos (v4.6, optional, off by default).** Tiles badged
+  "Pay to watch", "Buy or rent" or "Buy". Free-with-ads content stays visible.
 - **Clean-up extras**: ads/promos/nudges (on by default), plus optional hiding
   of Mixes, playlist tiles, news/topic shelves, the sidebar loading spinner,
   and end-screen/pause-screen suggestions.
