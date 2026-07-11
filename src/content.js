@@ -108,6 +108,8 @@
     let blackoutActive = false;       // current page is a blocked channel/video
     let lastQualityVideoId = null;    // video we've already forced to max quality
     let lastPointerDown = 0;          // timestamp of last pointerdown (menu-open hint)
+    let lastNativeVolGesture = 0;     // last real interaction with YouTube's own volume control
+    let nativeVolPointerDown = false; // a pointer is currently held on YouTube's volume slider
 
     /* ------------------------------------------------------------------
      * Selectors (shared by removal passes)
@@ -2438,9 +2440,23 @@
         const wrap = document.getElementById('ytb-boost-slider');
         if (!wrap || wrap.dataset.ytbOwner !== INSTANCE_ID) return;
         const v = playerVideo();
-        const atMax = nativeAtMax(v);
-        // Native volume dropped below 100%: boost turns off and the slider hides.
-        if (!atMax && (settings.volumeBoost || 1) > 1) setVolumeBoost(1);
+        const boosting = (settings.volumeBoost || 1) > 1;
+        // While a boost is active the element is pinned to 100% and the gain
+        // rides on top. Native volume can still fall below 100% two ways:
+        //   - the user deliberately drags YouTube's own slider down (or hits the
+        //     volume keys) -> honour it and switch the boost off, matching the
+        //     "pull the slider back below 100% to reset" behaviour; or
+        //   - YouTube re-applies its stored volume on its own -> a spurious drop
+        //     (it fires when the volume panel wakes up as the controls fade in
+        //     on hover) that must NOT wipe the user's boost.
+        // A mute is neither: keep the boost and let it return on unmute.
+        if (v && boosting && !v.muted && v.volume < 0.999) {
+            const userDriven = nativeVolPointerDown ||
+                               (Date.now() - lastNativeVolGesture < 1500);
+            if (userDriven) setVolumeBoost(1);   // deliberate: turn boost off
+            else v.volume = 1;                    // spurious: re-pin, keep boosting
+        }
+        const atMax = nativeAtMax(playerVideo());
         wrap.classList.toggle('ytb-hide', !atMax);
         const input = wrap.querySelector('input');
         const label = wrap.querySelector('.ytb-bs-label');
@@ -2955,6 +2971,16 @@
     document.addEventListener('pointerdown', (e) => {
         if (retired) return;
         lastPointerDown = Date.now();
+        // A press that lands on YouTube's own volume control marks the volume
+        // changes that follow as user-driven, so updateBoostUI can tell a
+        // deliberate slider drag from YouTube re-applying its stored volume.
+        // Our boost slider sits as a sibling *after* .ytp-volume-area, so it
+        // never matches here.
+        if (e.target.closest &&
+            e.target.closest('.ytp-volume-area, .ytp-volume-panel, .ytp-mute-button')) {
+            nativeVolPointerDown = true;
+            lastNativeVolGesture = Date.now();
+        }
         // First user gesture: if a boost or the compressor was persisted, wire
         // the graph now (so the AudioContext can run rather than muting the
         // element).
@@ -2973,6 +2999,24 @@
             menuOwnerIsMain = true;
         }
         // Anything else (e.g. our own popup item) leaves the attribution intact.
+    }, true);
+
+    // Close out a native volume-slider drag; stamp the release so a trailing
+    // volumechange is still credited to the user.
+    document.addEventListener('pointerup', () => {
+        if (retired || !nativeVolPointerDown) return;
+        nativeVolPointerDown = false;
+        lastNativeVolGesture = Date.now();
+    }, true);
+    document.addEventListener('pointercancel', () => { nativeVolPointerDown = false; }, true);
+    // YouTube's own volume hotkeys (Arrow Up/Down, m) count as deliberate too.
+    document.addEventListener('keydown', (e) => {
+        if (retired) return;
+        if ((e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'm' || e.key === 'M') &&
+            !/^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || '') &&
+            !(e.target && e.target.isContentEditable)) {
+            lastNativeVolGesture = Date.now();
+        }
     }, true);
 
     api.runtime.onMessage.addListener((msg) => {
