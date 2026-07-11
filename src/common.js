@@ -33,6 +33,7 @@ const YTB = (function () {
         hidePlaylists: false,
         hideNewsShelves: false,
         hideMembersOnly: false,      // off by default: people may be members on some channels
+        hidePaidVideos: false,       // off by default: hide Pay-to-watch / Buy-or-rent tiles
         syncBlockLists: false,       // mirror block lists via the browser's own sync
         volumeBoost: 1,
         wheelVolume: true,

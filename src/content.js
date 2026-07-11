@@ -54,6 +54,7 @@
         hidePlaylists: false,
         hideNewsShelves: false,
         hideMembersOnly: false,      // off by default: people may be members on some channels
+        hidePaidVideos: false,       // off by default: hide Pay-to-watch / Buy-or-rent tiles
         syncBlockLists: false,       // handled by the background script
         volumeBoost: 1,        // 1 = 100% (native, no Web Audio graph)
         wheelVolume: true,     // scroll over the player to change volume/boost
@@ -213,6 +214,33 @@
         // Badge labels are short; a long string means we grabbed a container.
         if (!t || t.length > 60) return false;
         return MEMBERS_TEXTS.some(s => t.includes(s));
+    }
+
+    // Paid / rental tiles. YouTube tags monetised videos with a <badge-shape>
+    // carrying the language-independent class ytBadgeShapeCommerce; the label
+    // text (mirrored in aria-label) says HOW it's monetised. We hide the ones
+    // that cost money (Pay to watch / Buy or rent / Buy) but deliberately leave
+    // "Free with ads" — that content is free. Matching the paid labels (rather
+    // than the class minus free) means an unlisted-language free badge is never
+    // hidden by mistake; a paid tile in an unlisted language is only missed.
+    const PAID_BADGE_SEL = 'badge-shape.ytBadgeShapeCommerce';
+    const PAID_TEXTS = [
+        'pay to watch', 'buy or rent', 'rent or buy', 'buy', 'rent',   // en
+        'kaufen oder leihen', 'kaufen', 'leihen',                      // de
+        'comprar o alquilar', 'comprar', 'alquilar',                   // es
+        'acheter ou louer', 'acheter', 'louer',                        // fr
+        'noleggia o acquista', 'noleggia', 'acquista',                 // it
+        'alugar ou comprar', 'alugar',                                 // pt (comprar = es/pt)
+        'huren of kopen', 'huren', 'kopen'                             // nl
+    ];
+    const PAID_FREE_TEXTS = ['free with ads', 'free to watch', 'watch for free'];
+
+    function isPaidBadgeText(raw) {
+        if (!raw) return false;
+        const t = raw.trim().toLowerCase();
+        if (!t || t.length > 60) return false;
+        if (PAID_FREE_TEXTS.some(s => t.includes(s))) return false;   // free: keep it
+        return PAID_TEXTS.some(s => t.includes(s));
     }
 
     const SHORTS_CSS = `
@@ -874,6 +902,16 @@
         document.querySelectorAll(MEMBERS_BADGE_TEXT_HOSTS).forEach(badge => {
             if (badge.closest('.ytb-removed')) return;
             if (!isMembersText(badge.textContent)) return;
+            removeContainingTile(badge);
+        });
+    }
+
+    // Paid / rental videos, matched by their commerce badge. Mirrors the
+    // members-only pass: scan the badges, skip free-with-ads, hide the tile.
+    function removePaidVideos() {
+        document.querySelectorAll(PAID_BADGE_SEL).forEach(badge => {
+            if (badge.closest('.ytb-removed')) return;   // tile already hidden
+            if (!isPaidBadgeText(badge.getAttribute('aria-label') || badge.textContent)) return;
             removeContainingTile(badge);
         });
     }
@@ -1849,6 +1887,7 @@
             if (settings.hidePromos) removeNonVideoCards();
             if (settings.hideMixes || settings.hidePlaylists) removeMixesAndPlaylists();
             if (settings.hideMembersOnly) removeMembersOnly();
+            if (settings.hidePaidVideos) removePaidVideos();
             if (settings.hideWatched && watchedAllowedHere()) {
                 processWatchedByProgressBar();
                 processWatchedByContainer();

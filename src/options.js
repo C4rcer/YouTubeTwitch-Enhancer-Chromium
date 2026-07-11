@@ -67,6 +67,7 @@
         mixes: $('set-mixes'),
         playlists: $('set-playlists'),
         members: $('set-members'),
+        paid: $('set-paid'),
         news: $('set-news'),
         spinner: $('set-spinner'),
         endscreen: $('set-endscreen'),
@@ -142,6 +143,7 @@
         els.mixes.checked = !!data.settings.hideMixes;
         els.playlists.checked = !!data.settings.hidePlaylists;
         els.members.checked = !!data.settings.hideMembersOnly;
+        els.paid.checked = !!data.settings.hidePaidVideos;
         els.news.checked = !!data.settings.hideNewsShelves;
         els.spinner.checked = !!data.settings.hideSidebarSpinner;
         els.endscreen.checked = !!data.settings.hideEndScreen;
@@ -472,6 +474,7 @@
         data.settings.hideMixes = els.mixes.checked;
         data.settings.hidePlaylists = els.playlists.checked;
         data.settings.hideMembersOnly = els.members.checked;
+        data.settings.hidePaidVideos = els.paid.checked;
         data.settings.hideNewsShelves = els.news.checked;
         data.settings.hideSidebarSpinner = els.spinner.checked;
         data.settings.hideEndScreen = els.endscreen.checked;
@@ -547,7 +550,7 @@
          els.sb, els.sbSponsor, els.sbSelfpromo, els.sbInteraction, els.sbIntro,
          els.sbOutro, els.sbPreview, els.sbOfftopic, els.sbFiller, els.sbBadges,
          els.deTitles, els.deThumbs, els.ryd,
-         els.promos, els.mixes, els.playlists, els.members, els.news, els.spinner, els.endscreen,
+         els.promos, els.mixes, els.playlists, els.members, els.paid, els.news, els.spinner, els.endscreen,
          els.sync
         ].forEach(c => c.addEventListener('change', saveSettings));
         els.threshold.addEventListener('change', saveSettings);

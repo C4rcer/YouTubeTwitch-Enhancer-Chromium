@@ -22,6 +22,7 @@
         shorts: $('set-shorts'),
         watched: $('set-watched'),
         members: $('set-members'),
+        paid: $('set-paid'),
         reveal: $('set-reveal'),
         wheelvol: $('set-wheelvol'),
         cinema: $('set-cinema'),
@@ -83,6 +84,7 @@
         els.shorts.checked = !!data.settings.blockShorts;
         els.watched.checked = !!data.settings.hideWatched;
         els.members.checked = !!data.settings.hideMembersOnly;
+        els.paid.checked = !!data.settings.hidePaidVideos;
         els.reveal.checked = !!data.settings.revealHidden;
         els.wheelvol.checked = !!data.settings.wheelVolume;
         els.cinema.checked = !!data.settings.ytCinemaButton;
@@ -164,6 +166,7 @@
         data.settings.blockShorts = els.shorts.checked;
         data.settings.hideWatched = els.watched.checked;
         data.settings.hideMembersOnly = els.members.checked;
+        data.settings.hidePaidVideos = els.paid.checked;
         data.settings.revealHidden = els.reveal.checked;
         data.settings.wheelVolume = els.wheelvol.checked;
         data.settings.ytCinemaButton = els.cinema.checked;
@@ -237,7 +240,7 @@
             window.close();
         });
         // Settings (both panels)
-        [els.enabled, els.shorts, els.watched, els.members, els.reveal, els.wheelvol, els.cinema,
+        [els.enabled, els.shorts, els.watched, els.members, els.paid, els.reveal, els.wheelvol, els.cinema,
          els.twEnabled, els.twAutoclaim, els.twDrops, els.twMoments, els.twAnon,
          els.twEmotes, els.twCinema, els.twCarousel, els.twHideChat,
          els.twClipHelper, els.twMaxQuality, els.twHideExt
