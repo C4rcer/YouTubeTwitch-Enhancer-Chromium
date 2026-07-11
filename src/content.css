@@ -153,12 +153,126 @@ html[data-ytb-reveal] .ytb-removed:hover {
 #ytb-sb-notice .ytb-sbn-unskip:hover {
     text-decoration: underline;
 }
+#ytb-sb-notice .ytb-sbn-report {
+    color: #ff8f8f;
+}
+#ytb-sb-notice .ytb-sbn-report:hover {
+    text-decoration: underline;
+}
 #ytb-sb-notice .ytb-sbn-close {
     opacity: 0.7;
     font-size: 12px;
 }
 #ytb-sb-notice .ytb-sbn-close:hover {
     opacity: 1;
+}
+
+/* SponsorBlock creation & voting panel (opened from the player button). */
+#ytb-sb-panel {
+    position: absolute;
+    right: 12px;
+    bottom: 64px;
+    z-index: 62;
+    width: 320px;
+    max-height: 70%;
+    overflow-y: auto;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(20, 20, 20, 0.94);
+    color: #eee;
+    font: 400 13px/1.4 "Roboto", system-ui, sans-serif;
+}
+#ytb-sb-panel button {
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #eee;
+    font: 500 12px/1 "Roboto", system-ui, sans-serif;
+    padding: 6px 10px;
+    cursor: pointer;
+}
+#ytb-sb-panel button:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.16);
+}
+#ytb-sb-panel button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+#ytb-sb-panel .ytb-sbp-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+#ytb-sb-panel .ytb-sbp-x {
+    border: 0;
+    background: none;
+    opacity: 0.7;
+}
+#ytb-sb-panel .ytb-sbp-x:hover {
+    opacity: 1;
+    background: none;
+}
+#ytb-sb-panel .ytb-sbp-seg {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+}
+#ytb-sb-panel .ytb-sbp-seg button {
+    padding: 3px 6px;
+}
+#ytb-sb-panel .ytb-sbp-dot {
+    flex: 0 0 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+#ytb-sb-panel .ytb-sbp-lab {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#ytb-sb-panel .ytb-sbp-none {
+    color: #aaa;
+    margin-bottom: 6px;
+}
+#ytb-sb-panel .ytb-sbp-draft {
+    border-top: 1px solid rgba(255, 255, 255, 0.15);
+    margin-top: 8px;
+    padding-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+#ytb-sb-panel .ytb-sbp-primary {
+    background: #b71c1c;
+    border-color: #b71c1c;
+    color: #fff;
+}
+#ytb-sb-panel .ytb-sbp-primary:hover:not(:disabled) {
+    background: #d32f2f;
+}
+#ytb-sb-panel .ytb-sbp-time {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+#ytb-sb-panel .ytb-sbp-time span {
+    flex: 1;
+}
+#ytb-sb-panel .ytb-sbp-actions {
+    display: flex;
+    gap: 8px;
+}
+#ytb-sb-panel select {
+    background: #222;
+    color: #eee;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font: inherit;
 }
 
 /* Return YouTube Dislike count appended to the (icon-only) dislike button.

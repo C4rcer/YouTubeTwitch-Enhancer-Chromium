@@ -1095,6 +1095,16 @@
         v.dataset.ytbSbHook = INSTANCE_ID;
         v.addEventListener('timeupdate', () => {
             if (retired || !settings.enabled || !settings.sbEnabled || v.paused) return;
+            // One-shot local jump for the panel's "Test skip" — works before
+            // the segment exists server-side.
+            if (sbPreviewSeg && v.currentTime >= sbPreviewSeg.start && v.currentTime < sbPreviewSeg.end) {
+                const end = sbPreviewSeg.end;
+                sbPreviewSeg = null;
+                sbLastSkipAt = Date.now();
+                try { v.currentTime = end; } catch (e) { /* ignore */ }
+                showVolumeOverlay('⏭ test skip');
+                return;
+            }
             if (sbState.vid !== watchVideoId()) return;
             const segs = sbState.segments;
             if (!segs || !segs.length) return;
@@ -1141,6 +1151,23 @@
                 el.classList.remove('ytb-show');
             });
             el.appendChild(unskip);
+            const report = document.createElement('button');
+            report.className = 'ytb-sbn-report';
+            report.type = 'button';
+            report.title = 'Bad segment? Downvotes it on SponsorBlock';
+            report.textContent = 'Report';
+            report.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const s = el._seg;
+                if (s && s.uuid) {
+                    api.runtime.sendMessage({ action: 'ytb-sb-vote', uuid: s.uuid, type: 0 })
+                        .then(res => toast(res && res.ok ? 'Segment reported' : 'Report failed'))
+                        .catch(() => toast('Report failed'));
+                }
+                el.classList.remove('ytb-show');
+            });
+            el.appendChild(report);
             const close = document.createElement('button');
             close.className = 'ytb-sbn-close';
             close.type = 'button';
@@ -1156,11 +1183,212 @@
         // Re-attach if the player was rebuilt.
         if (el.parentElement !== player) player.appendChild(el);
         el.querySelector('.ytb-sbn-text').textContent = '⏭ Skipped ' + sbLabel(seg.category);
+        el.querySelector('.ytb-sbn-report').style.display = seg.uuid ? '' : 'none';
         el._seg = seg;
         el._video = video;
         el.classList.add('ytb-show');
         clearTimeout(sbNoticeTimer);
         sbNoticeTimer = setTimeout(() => el.classList.remove('ytb-show'), 7000);
+    }
+
+    /* ---- SponsorBlock creation & voting panel --------------------------
+     * Opened from the ytb-sb-btn player button (present on every video
+     * while SponsorBlock is enabled). Mark start/end at the playhead,
+     * nudge by ±0.5s, test the jump locally, pick a category and submit;
+     * existing segments can be voted on. Submissions and votes carry the
+     * local SponsorBlock user ID (see background.js / options page).
+     * ------------------------------------------------------------------ */
+    let sbDraft = null;        // { vid, start, end|null, category }
+    let sbPreviewSeg = null;   // one-shot local skip test
+
+    function fmtSbTime(s) {
+        s = Math.max(0, s || 0);
+        return Math.floor(s / 60) + ':' + (s % 60).toFixed(1).padStart(4, '0');
+    }
+
+    function closeSbPanel() {
+        const p = document.getElementById('ytb-sb-panel');
+        if (p) p.remove();
+    }
+
+    function onSbBtnClick() {
+        if (document.getElementById('ytb-sb-panel')) closeSbPanel();
+        else renderSbPanel();
+    }
+
+    function sbNudge(which, delta) {
+        if (!sbDraft) return;
+        if (which === 'start') sbDraft.start = Math.max(0, +(sbDraft.start + delta).toFixed(1));
+        else if (sbDraft.end != null) sbDraft.end = Math.max(0, +(sbDraft.end + delta).toFixed(1));
+        renderSbPanel();
+    }
+
+    function sbTimeRow(label, which, value) {
+        const row = document.createElement('div');
+        row.className = 'ytb-sbp-time';
+        const lab = document.createElement('span');
+        lab.textContent = label + ' at ' + fmtSbTime(value);
+        row.appendChild(lab);
+        for (const [txt, d] of [['−0.5s', -0.5], ['+0.5s', 0.5]]) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.textContent = txt;
+            b.addEventListener('click', () => sbNudge(which, d));
+            row.appendChild(b);
+        }
+        return row;
+    }
+
+    function renderSbPanel() {
+        const player = document.getElementById('movie_player');
+        if (!player) return;
+        closeSbPanel();
+        const panel = document.createElement('div');
+        panel.id = 'ytb-sb-panel';
+
+        const head = document.createElement('div');
+        head.className = 'ytb-sbp-head';
+        const title = document.createElement('b');
+        title.textContent = 'SponsorBlock';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'ytb-sbp-x';
+        close.textContent = '✕';
+        close.addEventListener('click', closeSbPanel);
+        head.append(title, close);
+        panel.appendChild(head);
+
+        // Existing segments, with voting.
+        const segs = (sbState.vid === watchVideoId() && sbState.segments) || [];
+        if (segs.length) {
+            const list = document.createElement('div');
+            list.className = 'ytb-sbp-list';
+            for (const s of segs) {
+                const row = document.createElement('div');
+                row.className = 'ytb-sbp-seg';
+                const dot = document.createElement('span');
+                dot.className = 'ytb-sbp-dot';
+                dot.style.background = SB_COLORS[s.category] || '#00d400';
+                const lab = document.createElement('span');
+                lab.className = 'ytb-sbp-lab';
+                lab.textContent = sbLabel(s.category) + ' · ' + fmtSbTime(s.start) + '–' + fmtSbTime(s.end);
+                row.append(dot, lab);
+                for (const [glyph, type, tip] of [['👍', 1, 'Vote up'], ['👎', 0, 'Vote down']]) {
+                    const b = document.createElement('button');
+                    b.type = 'button';
+                    b.textContent = glyph;
+                    b.title = tip;
+                    b.addEventListener('click', () => {
+                        b.disabled = true;
+                        api.runtime.sendMessage({ action: 'ytb-sb-vote', uuid: s.uuid, type })
+                            .then(res => toast(res && res.ok ? 'Vote sent' : 'Vote failed',
+                                res && res.ok ? '' : String(res && res.error || '').slice(0, 80)))
+                            .catch(() => toast('Vote failed'));
+                    });
+                    row.appendChild(b);
+                }
+                list.appendChild(row);
+            }
+            panel.appendChild(list);
+        } else {
+            const none = document.createElement('div');
+            none.className = 'ytb-sbp-none';
+            none.textContent = sbState.pending
+                ? 'Looking up segments…'
+                : 'No community segments on this video yet — you can submit the first.';
+            panel.appendChild(none);
+        }
+
+        // Draft / creation area.
+        const draft = document.createElement('div');
+        draft.className = 'ytb-sbp-draft';
+        const v = playerVideo();
+        if (!sbDraft || sbDraft.vid !== watchVideoId()) {
+            sbDraft = null;
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'ytb-sbp-primary';
+            b.textContent = '▶ Segment starts now';
+            b.title = 'Marks the current playhead as the start of a new segment';
+            b.addEventListener('click', () => {
+                if (!v) return;
+                sbDraft = { vid: watchVideoId(), start: +v.currentTime.toFixed(1), end: null, category: 'sponsor' };
+                renderSbPanel();
+            });
+            draft.appendChild(b);
+        } else {
+            draft.appendChild(sbTimeRow('Start', 'start', sbDraft.start));
+            if (sbDraft.end == null) {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'ytb-sbp-primary';
+                b.textContent = '⏹ Segment ends now';
+                b.addEventListener('click', () => {
+                    if (!v) return;
+                    sbDraft.end = +v.currentTime.toFixed(1);
+                    if (sbDraft.end <= sbDraft.start) sbDraft.end = sbDraft.start + 1;
+                    renderSbPanel();
+                });
+                draft.appendChild(b);
+            } else {
+                draft.appendChild(sbTimeRow('End', 'end', sbDraft.end));
+                const cat = document.createElement('select');
+                for (const [c, , label] of SB_CATEGORIES) {
+                    const o = document.createElement('option');
+                    o.value = c;
+                    o.textContent = label;
+                    cat.appendChild(o);
+                }
+                cat.value = sbDraft.category || 'sponsor';
+                cat.addEventListener('change', () => { sbDraft.category = cat.value; });
+                draft.appendChild(cat);
+                const actions = document.createElement('div');
+                actions.className = 'ytb-sbp-actions';
+                const test = document.createElement('button');
+                test.type = 'button';
+                test.textContent = 'Test skip';
+                test.title = 'Seeks 2s before the start and replays the jump once, locally';
+                test.addEventListener('click', () => {
+                    if (!v) return;
+                    sbPreviewSeg = { start: sbDraft.start, end: sbDraft.end };
+                    try {
+                        v.currentTime = Math.max(0, sbDraft.start - 2);
+                        v.play().catch(() => {});
+                    } catch (e) { /* ignore */ }
+                });
+                const submit = document.createElement('button');
+                submit.type = 'button';
+                submit.className = 'ytb-sbp-primary';
+                submit.textContent = 'Submit';
+                submit.addEventListener('click', () => {
+                    if (sbDraft.end - sbDraft.start < 0.5) { toast('Segment too short'); return; }
+                    submit.disabled = true;
+                    api.runtime.sendMessage({
+                        action: 'ytb-sb-submit', videoId: sbDraft.vid,
+                        start: sbDraft.start, end: sbDraft.end,
+                        category: sbDraft.category || 'sponsor'
+                    }).then(res => {
+                        if (res && res.ok) {
+                            toast('Segment submitted', 'thank you!');
+                            sbDraft = null;
+                            sbState = { vid: null, segments: null, pending: false };  // force refetch
+                            renderSbPanel();
+                        } else {
+                            submit.disabled = false;
+                            toast('Submission failed', String(res && res.error || 'network error').slice(0, 100));
+                        }
+                    }).catch(() => { submit.disabled = false; toast('Submission failed'); });
+                });
+                const discard = document.createElement('button');
+                discard.type = 'button';
+                discard.textContent = 'Discard';
+                discard.addEventListener('click', () => { sbDraft = null; renderSbPanel(); });
+                actions.append(test, submit, discard);
+                draft.appendChild(actions);
+            }
+        }
+        panel.appendChild(draft);
+        player.appendChild(panel);
     }
 
     function ensureSponsorBlock() {
@@ -1180,6 +1408,7 @@
                             (segs.length === 1 ? ' segment' : ' segments') + ' will be skipped');
                         updateSbMarkers();
                     }
+                    if (document.getElementById('ytb-sb-panel')) renderSbPanel();
                 })
                 .catch(() => {
                     if (sbState.vid === vid) sbState = { vid, segments: [], pending: false };
@@ -2303,7 +2532,10 @@
                'M4.5 8h5v3h-5zM9.5 13.5h5v3h-5zM14.5 6h5v3h-5z'],
         // half-filled circle (cinema)
         cinema: ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 2a7 7 0 1 1 0 14 7 7 0 0 1 0-14Z',
-                 'M12 5a7 7 0 0 0 0 14V5Z']
+                 'M12 5a7 7 0 0 0 0 14V5Z'],
+        // shield with a skip-forward glyph (SponsorBlock panel)
+        sb: ['M12 2 4 5v6c0 4.8 3.4 9.1 8 10.2 4.6-1.1 8-5.4 8-10.2V5l-8-3Zm0 2.15 6 2.25V11c0 3.8-2.6 7.2-6 8.2-3.4-1-6-4.4-6-8.2V6.4l6-2.25Z',
+             'M9.2 8.8v6.4l4.2-3.2-4.2-3.2Zm5.2 0h1.6v6.4h-1.6V8.8Z']
     };
 
     function ensurePlayerButton(cls, want, title, icon, onClick) {
@@ -2428,8 +2660,14 @@
             'A-B loop — 1st click sets the start, 2nd the end (loops), 3rd clears', 'loop', onLoopClick);
         const comp = ensurePlayerButton('ytb-comp-btn', settings.ytCompressorButton,
             'Audio compressor — evens out quiet dialogue and loud passages', 'comp', onCompClick);
+        // SponsorBlock is present on EVERY video while the feature is on —
+        // it's the entry point for creating segments where none exist yet.
+        const sbBtn = ensurePlayerButton('ytb-sb-btn', settings.sbEnabled,
+            'SponsorBlock — create a segment or vote on this video\'s segments', 'sb', onSbBtnClick);
         if (comp) comp.classList.toggle('ytb-on', !!settings.ytCompressorOn);
         if (loop) loop.classList.toggle('ytb-on', loopState.mode !== 0);
+        if (sbBtn) sbBtn.classList.toggle('ytb-on', !!document.getElementById('ytb-sb-panel'));
+        if (sbDraft && sbDraft.vid !== watchVideoId()) sbDraft = null;
         void shot;
     }
 

@@ -489,7 +489,36 @@
         els.importFile.addEventListener('change', (e) => { if (e.target.files[0]) doImport(e.target.files[0]); e.target.value = ''; });
         els.copyBtn.addEventListener('click', doCopy);
         els.clearBtn.addEventListener('click', doClear);
+        wireSbUserId();
         YTB.onChanged((d) => { data = d; render(); });
+    }
+
+    // SponsorBlock user ID lives in its own storage key (outside `data`) so
+    // list-clearing and sync never touch it. Pasting the ID from the
+    // official SponsorBlock extension carries reputation over.
+    function wireSbUserId() {
+        const input = $('sb-uid');
+        const copy = $('sb-uid-copy');
+        if (!input) return;
+        api.storage.local.get('sbUserId').then(r => { input.value = r.sbUserId || ''; });
+        let t = null;
+        input.addEventListener('input', () => {
+            clearTimeout(t);
+            t = setTimeout(() => {
+                const v = input.value.trim();
+                if (v) api.storage.local.set({ sbUserId: v });
+                else api.storage.local.remove('sbUserId');
+                status(v ? 'SponsorBlock user ID saved.' : 'SponsorBlock user ID cleared — a fresh one is generated on the next submission.');
+            }, 500);
+        });
+        copy.addEventListener('click', async () => {
+            try {
+                await navigator.clipboard.writeText(input.value);
+                status('SponsorBlock user ID copied.');
+            } catch (e) {
+                status('Could not copy — select the text manually.');
+            }
+        });
     }
 
     async function start() {

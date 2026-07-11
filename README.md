@@ -74,10 +74,18 @@ the separate SponsorBlock / DeArrow / Return YouTube Dislike extensions:
 
 - **SponsorBlock: skip segments.** Auto-skips crowdsourced sponsor reads,
   self-promos, like/subscribe reminders and (optionally) intros, outros,
-  previews, non-music sections and filler. Every skip shows a notice with an
-  **Unskip** button that jumps back and stops auto-skipping that segment.
-  Lookups use SponsorBlock's k-anonymity endpoint: only a 4-character hash
-  prefix of the video ID leaves your browser.
+  previews, non-music sections and filler. Every skip shows a notice with
+  **Unskip** (jumps back and stops auto-skipping that segment) and **Report**
+  (downvotes a bad segment) buttons. Lookups use SponsorBlock's k-anonymity
+  endpoint: only a 4-character hash prefix of the video ID leaves your
+  browser.
+- **SponsorBlock: create & vote.** A shield button on every video's player
+  (while SponsorBlock is on) opens a panel: mark a segment's start and end at
+  the playhead (±0.5 s nudges, local test of the jump), pick a category and
+  submit it to SponsorBlock; existing segments can be up- or down-voted.
+  Submissions and votes carry a local SponsorBlock user ID, generated
+  automatically. Migrating from the official SponsorBlock extension? Paste
+  your user ID into the options page and your reputation carries over.
 - **DeArrow: community titles & thumbnails.** Replaces clickbait titles (and,
   via a separate heavier toggle, thumbnails) with community-submitted ones
   where they exist.

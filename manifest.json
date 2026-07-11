@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube/Twitch Enhancer",
-  "version": "4.3.1",
+  "version": "4.4.0",
   "description": "Block channels, categories & keywords on YouTube & Twitch. Hide Shorts & watched videos, auto-claim points & drops, player tools.",
 
   "minimum_chrome_version": "111",
