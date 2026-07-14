@@ -21,6 +21,10 @@
     const STORAGE_KEY = 'data';
     const LEGACY_HIDDEN_KEY = 'ytShortsBlocker_manuallyHiddenIds';
 
+    // Persistent watched-video database (src/watched-db.js runs first in the
+    // same content-script scope). All watched-history storage goes through it.
+    const WatchedDB = ((typeof self !== 'undefined') ? self : window).YTBWatchedDB || null;
+
     // When the extension updates in place, Firefox orphans the old content
     // script: its DOM listeners keep firing but its storage/API access is
     // dead. Every marker we leave on DOM nodes is therefore tagged with this
@@ -34,7 +38,7 @@
         enabled: true,               // master switch for the whole extension
         blockShorts: true,
         hideWatched: true,
-        watchedThreshold: 75,
+        watchedThreshold: 90,
         // Per-surface scope for watched-hiding. Playlists default OFF because
         // seeing progress in Watch Later / playlists is usually the point.
         watchedHome: true,
@@ -111,6 +115,59 @@
     let lastPointerDown = 0;          // timestamp of last pointerdown (menu-open hint)
     let lastNativeVolGesture = 0;     // last real interaction with YouTube's own volume control
     let nativeVolPointerDown = false; // a pointer is currently held on YouTube's volume slider
+    let curChannelInfo = null;        // channel identity of the current channel page (per pass)
+    let tileCache = new WeakMap();    // canonical tile -> { version, videoId, reason }
+    let filterConfigSignature = '';
+    let filterBootTimer = null;
+    let pageObserver = null;
+    let detailObserver = null;
+    let detailObserved = new WeakSet();
+    let maintenanceTimer = null;
+    let tileEnhancementTimer = null;
+    const pendingTileEnhancements = new Set();
+    const lifecycleIntervals = [];
+
+    const FILTER_BOOT_ATTR = 'data-ytb-filter-boot';
+    const FILTER_PENDING_CLASS = 'ytb-filter-pending';
+    const FILTER_BOOT_FAIL_OPEN_MS = 3000;
+
+    // Start the gate before the first asynchronous storage read. content.css is
+    // already present (manifest content-script CSS loads first), so YouTube
+    // cannot paint an unclassified card while settings/history are loading.
+    function beginFilterBoot() {
+        const root = document.documentElement;
+        if (!root) return;
+        root.setAttribute(FILTER_BOOT_ATTR, INSTANCE_ID);
+        filterBootTimer = setTimeout(() => {
+            filterBootTimer = null;
+            if (root.getAttribute(FILTER_BOOT_ATTR) === INSTANCE_ID) {
+                root.removeAttribute(FILTER_BOOT_ATTR);
+            }
+        }, FILTER_BOOT_FAIL_OPEN_MS);
+    }
+
+    function endFilterBoot() {
+        if (filterBootTimer) {
+            clearTimeout(filterBootTimer);
+            filterBootTimer = null;
+        }
+        const root = document.documentElement;
+        if (root && root.getAttribute(FILTER_BOOT_ATTR) === INSTANCE_ID) {
+            root.removeAttribute(FILTER_BOOT_ATTR);
+        }
+    }
+
+    // Remove the previous implementation's expensive :has() stylesheet and
+    // survivor markers during same-DOM extension updates.
+    function cleanupLegacyAntiflash() {
+        const style = document.getElementById('ytb-antiflash-style');
+        if (style) style.remove();
+        document.querySelectorAll('[data-ytb-keep]')
+            .forEach(el => el.removeAttribute('data-ytb-keep'));
+    }
+
+    cleanupLegacyAntiflash();
+    beginFilterBoot();
 
     /* ------------------------------------------------------------------
      * Selectors (shared by removal passes)
@@ -121,16 +178,26 @@
         'ytd-grid-video-renderer',
         'ytd-compact-video-renderer',
         'ytd-playlist-video-renderer',
+        'ytd-playlist-renderer',
+        'ytd-grid-playlist-renderer',
+        'ytd-compact-playlist-renderer',
+        'ytd-radio-renderer',
+        'ytd-compact-radio-renderer',
         'ytd-reel-item-renderer',
         'ytd-rich-grid-media',
         'yt-lockup-view-model',
         'ytm-shorts-lockup-view-model',
         'ytm-shorts-lockup-view-model-v2',
+        'ytm-reel-item-renderer',
         // m.youtube.com (Firefox for Android) tile containers
         'ytm-rich-item-renderer',
         'ytm-video-with-context-renderer',
         'ytm-compact-video-renderer',
         'ytm-playlist-video-renderer',
+        'ytm-playlist-renderer',
+        'ytm-compact-playlist-renderer',
+        'ytm-radio-renderer',
+        'ytm-compact-radio-renderer',
         'ytm-video-card-renderer',
         'ytm-media-item'
     ].join(',');
@@ -149,6 +216,9 @@
 
     const PROGRESS_SELECTORS = [
         'ytd-thumbnail-overlay-resume-playback-renderer #progress',
+        // Structural fallback: the fill is a width-styled child of the resume
+        // overlay regardless of its (obfuscated) class name.
+        'ytd-thumbnail-overlay-resume-playback-renderer [style*="width"]',
         '#progress[style*="width"]',
         '.ytThumbnailOverlayProgressBarHostWatchedProgressBarSegment',
         'yt-thumbnail-overlay-progress-bar-view-model div[style*="width"]',
@@ -161,6 +231,10 @@
         '.ytThumbnailOverlayProgressBarHostWatchedProgressBar',
         '.ytThumbnailOverlayProgressBarHostWatchedProgressBarLegacy'
     ].join(',');
+    const WATCHED_PROGRESS_MARKERS = PROGRESS_SELECTORS + ',' +
+        WATCHED_BAR_CONTAINERS.split(',')
+            .map(selector => selector + ' [style*="width"]')
+            .join(',');
 
     const NON_VIDEO_CARDS = [
         'ytd-feed-nudge-renderer',
@@ -176,6 +250,15 @@
         'ytm-promoted-video-renderer',
         'ytm-companion-ad-renderer',
         'ytm-statement-banner-renderer'
+    ].join(',');
+
+    // Non-tile shelves and promos still use their older dedicated passes.
+    const LEGACY_MUTATION_CONTAINERS = [
+        'ytd-rich-section-renderer',
+        'ytd-rich-shelf-renderer',
+        'ytd-reel-shelf-renderer',
+        'ytm-reel-shelf-renderer',
+        NON_VIDEO_CARDS
     ].join(',');
 
     // Members-only tiles. The classic desktop badge carries a language-
@@ -224,6 +307,17 @@
     // than the class minus free) means an unlisted-language free badge is never
     // hidden by mistake; a paid tile in an unlisted language is only missed.
     const PAID_BADGE_SEL = 'badge-shape.ytBadgeShapeCommerce';
+    const FILTER_DETAIL_PROGRESS_HOSTS = [
+        'ytd-thumbnail-overlay-resume-playback-renderer',
+        'yt-thumbnail-overlay-progress-bar-view-model',
+        'ytm-thumbnail-overlay-resume-playback-renderer',
+        WATCHED_BAR_CONTAINERS
+    ].join(',');
+    const FILTER_DETAIL_BADGE_TARGETS = [
+        MEMBERS_BADGE_CLASS_SEL,
+        MEMBERS_BADGE_TEXT_HOSTS,
+        PAID_BADGE_SEL
+    ].join(',');
     const PAID_TEXTS = [
         'pay to watch', 'buy or rent', 'rent or buy', 'buy', 'rent',   // en
         'kaufen oder leihen', 'kaufen', 'leihen',                      // de
@@ -259,37 +353,6 @@
             display: none !important;
         }
     `;
-
-    // Anti-flash: keep tiles that carry a watched-progress overlay hidden until
-    // we've decided to keep them, so already-watched uploads never paint before
-    // being removed. Reveal happens by setting data-ytb-keep on survivors.
-    const ANTIFLASH_CELLS = [
-        'ytd-rich-item-renderer',
-        'ytd-video-renderer',
-        'ytd-grid-video-renderer',
-        'ytd-compact-video-renderer',
-        'ytd-playlist-video-renderer',
-        'yt-lockup-view-model',
-        'ytm-rich-item-renderer',
-        'ytm-video-with-context-renderer',
-        'ytm-compact-video-renderer',
-        'ytm-playlist-video-renderer'
-    ];
-    const ANTIFLASH_WATCHED = [
-        'ytd-thumbnail-overlay-resume-playback-renderer',
-        '.ytThumbnailOverlayProgressBarHostWatchedProgressBar',
-        '.ytThumbnailOverlayProgressBarHostWatchedProgressBarLegacy',
-        'ytm-thumbnail-overlay-resume-playback-renderer'
-    ];
-    const ANTIFLASH_SELECTOR = ANTIFLASH_CELLS
-        .flatMap(cell => ANTIFLASH_WATCHED.map(w => `${cell}:has(${w}):not([data-ytb-keep])`))
-        .join(',');
-    const ANTIFLASH_CSS = ANTIFLASH_SELECTOR + ' { display: none !important; }';
-    // JS-side equivalents: querying the (few) watched overlays and walking up
-    // with closest() is far cheaper than evaluating the :has() selector above
-    // via querySelectorAll on every pass.
-    const ANTIFLASH_WATCHED_SEL = ANTIFLASH_WATCHED.join(',');
-    const ANTIFLASH_CELLS_SEL = ANTIFLASH_CELLS.join(',');
 
     // Hide the related-sidebar infinite-scroll spinner. visibility:hidden keeps
     // the element's box so it still triggers loading of more recommendations.
@@ -391,18 +454,57 @@
         }
         settings = Object.assign({}, DEFAULT_SETTINGS, state.settings);
         compileKeywords();
+
+        // Only tile-affecting state invalidates the card cache. Player/chat
+        // settings share the same storage record and should not make a 500-card
+        // channel reclassify.
+        const nextFilterSignature = JSON.stringify({
+            hiddenVideoIds: state.hiddenVideoIds,
+            blockedChannels: state.blockedChannels,
+            blockedKeywords: state.blockedKeywords,
+            ytCommentKeywords: state.ytCommentKeywords,
+            settings: {
+                enabled: settings.enabled,
+                blockShorts: settings.blockShorts,
+                hideWatched: settings.hideWatched,
+                watchedThreshold: settings.watchedThreshold,
+                watchedHome: settings.watchedHome,
+                watchedSubs: settings.watchedSubs,
+                watchedSearch: settings.watchedSearch,
+                watchedRelated: settings.watchedRelated,
+                watchedChannel: settings.watchedChannel,
+                watchedPlaylists: settings.watchedPlaylists,
+                revealHidden: settings.revealHidden,
+                hidePromos: settings.hidePromos,
+                hideMixes: settings.hideMixes,
+                hidePlaylists: settings.hidePlaylists,
+                hideNewsShelves: settings.hideNewsShelves,
+                hideMembersOnly: settings.hideMembersOnly,
+                hidePaidVideos: settings.hidePaidVideos
+            }
+        });
+        const filterChanged = !!filterConfigSignature &&
+            nextFilterSignature !== filterConfigSignature;
+        if (filterChanged) resetTileFiltering();
+        filterConfigSignature = nextFilterSignature;
+
         const on = settings.enabled;
         applyShortsCss(on && settings.blockShorts);
         applySpinnerCss(on && settings.hideSidebarSpinner);
-        // Reveal mode needs the anti-flash CSS off, or audited tiles stay invisible.
-        applyAntiflashCss(on && settings.reduceFlashing && settings.hideWatched && !settings.revealHidden);
         applyEndScreenCss(on && settings.hideEndScreen);
         if (on && settings.revealHidden) document.documentElement.dataset.ytbReveal = '1';
         else delete document.documentElement.dataset.ytbReveal;
-        configVersion++;
-        // Category toggles may have changed; refetch segments for this video
-        // (served from the background cache, so this is cheap).
-        sbState = { vid: null, segments: null, pending: false };
+        if (!configVersion || filterChanged) configVersion++;
+
+        if (!shouldGateNewTiles()) endFilterBoot();
+
+        // Category toggles may have changed. Invalidate only category-dependent
+        // thumbnail results, and tag watch-page requests with the new generation.
+        refreshSbCategoryGeneration();
+        sbState = {
+            vid: null, segments: null, pending: false,
+            generation: sbCategoryGeneration
+        };
     }
 
     async function persist() {
@@ -416,6 +518,7 @@
     // runAll). Load-merge-save: this script only owns the YouTube fields, so
     // pull the full record first rather than clobbering the Twitch lists.
     async function saveOnly() {
+        if (retired) return;
         try {
             const stored = await api.storage.local.get(STORAGE_KEY);
             const full = stored[STORAGE_KEY] || {};
@@ -479,20 +582,6 @@
         }
     }
 
-    function applyAntiflashCss(on) {
-        let s = document.getElementById('ytb-antiflash-style');
-        if (on) {
-            if (!s) {
-                s = document.createElement('style');
-                s.id = 'ytb-antiflash-style';
-                (document.head || document.documentElement).appendChild(s);
-            }
-            s.textContent = ANTIFLASH_CSS;
-        } else if (s) {
-            s.remove();
-        }
-    }
-
     function applyEndScreenCss(on) {
         let s = document.getElementById('ytb-endscreen-style');
         if (on) {
@@ -507,27 +596,11 @@
         }
     }
 
-    // Reveal watched tiles that survived the threshold removal (i.e. below the
-    // threshold), so the anti-flash CSS stops hiding them. Scans the watched
-    // overlays (few) instead of evaluating the :has() selector (expensive).
-    function revealRemainingWatched() {
-        document.querySelectorAll(ANTIFLASH_WATCHED_SEL).forEach(overlay => {
-            // Mark every ancestor cell, not just the innermost: tiles nest
-            // (yt-lockup-view-model inside ytd-rich-item-renderer) and the
-            // anti-flash CSS hides each matching level independently.
-            let cell = overlay.closest(ANTIFLASH_CELLS_SEL);
-            while (cell) {
-                if (!cell.dataset.ytbKeep) cell.dataset.ytbKeep = '1';
-                cell = cell.parentElement && cell.parentElement.closest(ANTIFLASH_CELLS_SEL);
-            }
-        });
-    }
-
     /* ==================================================================
      * 2. Redirect /shorts/<id> -> /watch?v=<id>
      * ================================================================== */
     function redirectShortsUrl() {
-        if (!settings.enabled || !settings.blockShorts) return;
+        if (retired || !settings.enabled || !settings.blockShorts) return;
         if (location.pathname.startsWith('/shorts/')) {
             const id = location.pathname.split('/')[2];
             // Keep the current host so m.youtube.com stays on the mobile site.
@@ -538,29 +611,58 @@
     /* ==================================================================
      * 3. Tile helpers
      * ================================================================== */
-    function removeTile(tile) {
-        let target = tile.closest(INNER_CONTAINERS) || tile;
+    function canonicalTile(tile) {
+        if (!tile || !tile.closest) return null;
+        let target = tile.matches && tile.matches(INNER_CONTAINERS)
+            ? tile
+            : tile.closest(INNER_CONTAINERS);
+        if (!target) return null;
         const outer = target.closest(OUTER_GRID_CELLS);
-        if (outer) target = outer;
-        if (target.classList.contains('ytb-removed')) return target;
-        // Hide in place instead of removing — see .ytb-removed in content.css.
-        target.classList.add('ytb-removed');
-        target.dataset.ytbKeep = '1';   // also exempt from the anti-flash :has() pass
-        return target;
+        return outer || target;
     }
 
-    // Un-hide everything we've hidden and drop the per-tile check cache, so
-    // the next pass re-evaluates from scratch. Used by undo + master switch.
-    function unhideAll() {
-        document.querySelectorAll('.ytb-removed').forEach(el => {
-            el.classList.remove('ytb-removed');
-            delete el.dataset.ytbChk;
+    function observeFilterDetails(root) {
+        if (!detailObserver || !root || detailObserved.has(root)) return;
+        detailObserved.add(root);
+        detailObserver.observe(root, {
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['style', 'title', 'class', 'aria-label', 'src'],
+            attributeOldValue: true,
+            characterData: true
         });
     }
 
-    function removeContainingTile(node) {
-        const target = node.closest(INNER_CONTAINERS);
-        if (target) removeTile(target);
+    function removeTile(tile, reason) {
+        const target = canonicalTile(tile);
+        if (!target) return null;
+        target.classList.add('ytb-removed');
+        target.classList.remove(FILTER_PENDING_CLASS);
+        target.dataset.ytbFilterReason = reason || 'other';
+        return target;
+    }
+
+    function resetTileFiltering() {
+        document.querySelectorAll('.ytb-removed').forEach(el => {
+            el.classList.remove('ytb-removed');
+            delete el.dataset.ytbFilterReason;
+        });
+        document.querySelectorAll('.' + FILTER_PENDING_CLASS)
+            .forEach(el => el.classList.remove(FILTER_PENDING_CLASS));
+        document.querySelectorAll('[data-ytb-keep]')
+            .forEach(el => el.removeAttribute('data-ytb-keep'));
+        tileCache = new WeakMap();
+    }
+
+    // Used by undo and the master switch. The next pass computes every card's
+    // current reason again, so settings changes cannot strand stale hidden cards.
+    function unhideAll() {
+        resetTileFiltering();
+    }
+
+    function removeContainingTile(node, reason) {
+        const target = node && node.closest && node.closest(INNER_CONTAINERS);
+        if (target) removeTile(target, reason);
     }
 
     function getVideoIdFromNode(node) {
@@ -930,66 +1032,322 @@
         return key === null ? true : !!settings[key];
     }
 
-    function processWatchedByProgressBar() {
-        document.querySelectorAll(PROGRESS_SELECTORS).forEach(bar => {
-            if (bar.closest('.ytb-removed')) return;   // tile already hidden
-            const w = bar.style && bar.style.width;
-            if (!w) return;
-            const pct = parseFloat(w);
-            if (isNaN(pct) || pct < settings.watchedThreshold) return;
-            removeContainingTile(bar);
-        });
+    // Record a tile YouTube's progress bar reports as watched into the local
+    // database (migration: newly-detected watched videos are remembered so we
+    // still hide them once YouTube inevitably drops the bar), and attribute it
+    // to the current channel page for the "Watched X/Y" badge.
+    function markTileWatched(node) {
+        if (!WatchedDB || !node) return;
+        const tile = node.closest(INNER_CONTAINERS) || node;
+        const id = getVideoIdFromNode(tile);
+        if (!id) return;
+        // A video the user manually hid stays categorized as hidden, even if it
+        // still shows a progress bar — the explicit hide wins over the tally.
+        if (hiddenSet.has(id)) {
+            if (curChannelInfo) WatchedDB.recordChannelHidden(curChannelInfo, id);
+            return;
+        }
+        WatchedDB.markWatched(id);
+        if (curChannelInfo) WatchedDB.recordChannelVideo(curChannelInfo, id);
     }
 
-    function processWatchedByContainer() {
-        document.querySelectorAll(WATCHED_BAR_CONTAINERS).forEach(container => {
-            if (container.closest('.ytb-removed')) return;   // tile already hidden
-            const widthEls = container.querySelectorAll('[style*="width"]');
-            for (const el of widthEls) {
-                const w = el.style && el.style.width;
-                if (!w) continue;
-                const pct = parseFloat(w);
-                if (isNaN(pct)) continue;
-                if (pct >= settings.watchedThreshold) {
-                    removeContainingTile(container);
-                    return;
-                }
-            }
+    function getTileWatchedPercent(tile) {
+        let max = null;
+        const readWidth = (el) => {
+            const width = el && el.style && el.style.width;
+            if (!width) return;
+            const pct = parseFloat(width);
+            if (!isNaN(pct)) max = max === null ? pct : Math.max(max, pct);
+        };
+
+        tile.querySelectorAll(PROGRESS_SELECTORS).forEach(readWidth);
+        tile.querySelectorAll(WATCHED_BAR_CONTAINERS).forEach(container => {
+            container.querySelectorAll('[style*="width"]').forEach(readWidth);
         });
+        return max;
     }
 
-    // Single pass handling blocked video IDs, blocked channels, and keywords.
-    function processTiles() {
-        const checkChannels = state.blockedChannels.length > 0;
-        const checkKeywords = keywordMatchers.length > 0;
-        if (!hiddenSet.size && !checkChannels && !checkKeywords) return;
-        const tiles = document.querySelectorAll(INNER_CONTAINERS);
-        for (const tile of tiles) {
-            if (tile.closest('.ytb-removed')) continue;   // already hidden
-            const id = getVideoIdFromNode(tile);
-            if (hiddenSet.size && id && hiddenSet.has(id)) {
-                removeTile(tile);
-                continue;
-            }
-            if (checkChannels || checkKeywords) {
-                const key = (id || tile.tagName) + '|' + configVersion;
-                if (tile.dataset.ytbChk === key) continue;   // already cleared at this config
-                if (checkChannels && tileMatchesBlockedChannel(getChannelInfoFromNode(tile))) {
-                    removeTile(tile);
-                    continue;
-                }
-                if (checkKeywords) {
-                    const title = getTitleFromNode(tile).toLowerCase();
-                    if (title && keywordMatchers.some(fn => fn(title))) {
-                        removeTile(tile);
-                        continue;
-                    }
-                }
-                tile.dataset.ytbChk = key;
-            }
+    function processWatchedProgress() {
+        if (!settings.hideWatched || !watchedAllowedHere()) return;
+        const percentages = new Map();
+        document.querySelectorAll(WATCHED_PROGRESS_MARKERS).forEach(marker => {
+            const tile = canonicalTile(marker);
+            if (!tile || tile.closest('.ytb-removed')) return;
+            const pct = parseFloat(marker.style && marker.style.width);
+            if (isNaN(pct)) return;
+            const previous = percentages.get(tile);
+            if (previous == null || pct > previous) percentages.set(tile, pct);
+        });
+        for (const [tile, pct] of percentages) {
+            if (pct < settings.watchedThreshold) continue;
+            markTileWatched(tile);
+            removeTile(tile, 'watched-progress');
         }
     }
 
+    function tileFilterContext() {
+        const checkWatched = !!settings.hideWatched && watchedAllowedHere();
+        const hidePlaylistsHere = !!settings.hidePlaylists &&
+            !location.pathname.startsWith('/playlist') &&
+            !location.pathname.startsWith('/feed/');
+        return {
+            // Per-surface watched rules and channel attribution can change on
+            // SPA navigation even when YouTube reuses the exact same card node.
+            version: configVersion + ':' +
+                (WatchedDB && WatchedDB.revision ? WatchedDB.revision() : 0) +
+                ':' + location.pathname + ':' +
+                (curChannelInfo
+                    ? (curChannelInfo.handle || curChannelInfo.channelId || curChannelInfo.name || '')
+                    : ''),
+            checkWatched,
+            checkChannels: state.blockedChannels.length > 0,
+            checkKeywords: keywordMatchers.length > 0,
+            attributeChannel: !!(WatchedDB && curChannelInfo),
+            blockShorts: !!settings.blockShorts,
+            hideMixes: !!settings.hideMixes,
+            hidePlaylists: hidePlaylistsHere,
+            hideMembers: !!settings.hideMembersOnly,
+            hidePaid: !!settings.hidePaidVideos,
+            active: !!settings.enabled && (
+                hiddenSet.size > 0 || checkWatched ||
+                state.blockedChannels.length > 0 || keywordMatchers.length > 0 ||
+                settings.blockShorts || settings.hideMixes || hidePlaylistsHere ||
+                settings.hideMembersOnly || settings.hidePaidVideos
+            )
+        };
+    }
+
+    function shouldGateNewTiles() {
+        if (!settings.enabled || settings.revealHidden || !settings.reduceFlashing) return false;
+        return tileFilterContext().active;
+    }
+
+    function tileHasMembersBadge(tile) {
+        if (tile.querySelector(MEMBERS_BADGE_CLASS_SEL)) return true;
+        for (const badge of tile.querySelectorAll(MEMBERS_BADGE_TEXT_HOSTS)) {
+            if (isMembersText(badge.textContent)) return true;
+        }
+        return false;
+    }
+
+    function tileHasPaidBadge(tile) {
+        for (const badge of tile.querySelectorAll(PAID_BADGE_SEL)) {
+            if (isPaidBadgeText(badge.getAttribute('aria-label') || badge.textContent)) return true;
+        }
+        return false;
+    }
+
+    function classifyTile(tile, id, ctx) {
+        let cacheable = !!id;
+
+        if (ctx.blockShorts &&
+            (tile.matches('ytd-reel-item-renderer, ytm-shorts-lockup-view-model, ' +
+                          'ytm-shorts-lockup-view-model-v2, ytm-reel-item-renderer') ||
+             tile.querySelector('a[href*="/shorts/"]'))) {
+            return { reason: 'shorts', cacheable };
+        }
+        if (ctx.hideMixes && tile.querySelector('a[href*="list=RD"], a[href*="start_radio=1"]')) {
+            return { reason: 'mix', cacheable };
+        }
+        if (ctx.hidePlaylists &&
+            (tile.matches('ytd-playlist-renderer, ytd-grid-playlist-renderer, ' +
+                          'ytd-compact-playlist-renderer, ytd-radio-renderer, ' +
+                          'ytd-compact-radio-renderer, ytm-playlist-renderer, ' +
+                          'ytm-compact-playlist-renderer, ytm-radio-renderer, ' +
+                          'ytm-compact-radio-renderer') ||
+             tile.querySelector('a[href^="/playlist?"]'))) {
+            return { reason: 'playlist', cacheable };
+        }
+        if (ctx.hideMembers && tileHasMembersBadge(tile)) {
+            return { reason: 'members-only', cacheable };
+        }
+        if (ctx.hidePaid && tileHasPaidBadge(tile)) {
+            return { reason: 'paid', cacheable };
+        }
+        if (id && hiddenSet.has(id)) {
+            if (ctx.attributeChannel) WatchedDB.recordChannelHidden(curChannelInfo, id);
+            return { reason: 'hidden-id', cacheable };
+        }
+        if (ctx.checkWatched && id && WatchedDB && WatchedDB.isWatched(id)) {
+            if (ctx.attributeChannel) WatchedDB.recordChannelVideo(curChannelInfo, id);
+            return { reason: 'watched-history', cacheable };
+        }
+        if (ctx.checkWatched && ctx.checkProgress) {
+            const pct = getTileWatchedPercent(tile);
+            if (pct !== null && pct >= settings.watchedThreshold) {
+                markTileWatched(tile);
+                return { reason: 'watched-progress', cacheable };
+            }
+        }
+
+        if (ctx.checkChannels) {
+            const channel = getChannelInfoFromNode(tile);
+            if (!channel) cacheable = false;
+            else if (tileMatchesBlockedChannel(channel)) {
+                return { reason: 'blocked-channel', cacheable };
+            }
+        }
+        if (ctx.checkKeywords) {
+            const title = getTitleFromNode(tile).toLowerCase();
+            if (!title) cacheable = false;
+            else if (keywordMatchers.some(fn => fn(title))) {
+                return { reason: 'blocked-keyword', cacheable };
+            }
+        }
+        return { reason: '', cacheable };
+    }
+
+    function evaluateTile(tile, ctx, force) {
+        const target = canonicalTile(tile);
+        if (!target) return;
+        observeFilterDetails(target);
+
+        const id = getVideoIdFromNode(target) || '';
+        const previous = tileCache.get(target);
+        if (!force && previous &&
+            previous.version === ctx.version && previous.videoId === id) {
+            // YouTube occasionally strips classes while reusing the same card.
+            // Keep the cached decision cheap, but repair the managed DOM state.
+            if (previous.reason &&
+                (!target.classList.contains('ytb-removed') ||
+                 target.dataset.ytbFilterReason !== previous.reason)) {
+                removeTile(target, previous.reason);
+            } else if (!previous.reason && target.dataset.ytbFilterReason) {
+                target.classList.remove('ytb-removed');
+                delete target.dataset.ytbFilterReason;
+            }
+            return;
+        }
+
+        // YouTube recycles renderer elements. A managed reason belongs to the
+        // old video, not to the DOM node, so identity changes are reclassified.
+        if (previous && previous.videoId !== id && target.dataset.ytbFilterReason) {
+            target.classList.remove('ytb-removed');
+            delete target.dataset.ytbFilterReason;
+        }
+
+        const result = classifyTile(target, id, ctx);
+        if (result.reason) {
+            removeTile(target, result.reason);
+        } else if (target.dataset.ytbFilterReason) {
+            target.classList.remove('ytb-removed');
+            delete target.dataset.ytbFilterReason;
+        }
+
+        if (result.cacheable) {
+            tileCache.set(target, { version: ctx.version, videoId: id, reason: result.reason });
+        } else {
+            tileCache.delete(target); // never freeze a partially hydrated shell
+        }
+    }
+
+    function addTileCandidates(node, tiles) {
+        if (!node || node.nodeType !== 1 || !node.closest) return;
+        const ancestor = node.closest(INNER_CONTAINERS);
+        if (ancestor) {
+            const tile = canonicalTile(ancestor);
+            if (tile) tiles.add(tile);
+        }
+        if (node.matches(INNER_CONTAINERS)) {
+            const tile = canonicalTile(node);
+            if (tile) tiles.add(tile);
+        }
+        node.querySelectorAll(INNER_CONTAINERS).forEach(inner => {
+            const tile = canonicalTile(inner);
+            if (tile) tiles.add(tile);
+        });
+    }
+
+    function collectAllTiles() {
+        const tiles = new Set();
+        document.querySelectorAll(INNER_CONTAINERS).forEach(inner => {
+            const tile = canonicalTile(inner);
+            if (tile) tiles.add(tile);
+        });
+        return tiles;
+    }
+
+    function addClosestTileCandidate(node, tiles) {
+        if (!node || node.nodeType !== 1 || !node.closest) return;
+        const ancestor = node.closest(INNER_CONTAINERS);
+        if (!ancestor) return;
+        const tile = canonicalTile(ancestor);
+        if (tile) tiles.add(tile);
+    }
+
+    function collectMutationTiles(records) {
+        const tiles = new Set();
+
+        for (const record of records) {
+            if (record.type === 'attributes') {
+                const target = record.target;
+                if (record.attributeName === 'style' &&
+                    !(target.matches && (target.matches(INNER_CONTAINERS) ||
+                      target.matches(PROGRESS_SELECTORS))) &&
+                    !(target.closest && target.closest(FILTER_DETAIL_PROGRESS_HOSTS))) continue;
+                if ((record.attributeName === 'class' ||
+                     record.attributeName === 'aria-label') &&
+                    !(target.matches && target.matches(FILTER_DETAIL_BADGE_TARGETS)) &&
+                    !(record.attributeName === 'class' &&
+                      /badge-style-type-members-only|ytBadgeShapeCommerce/
+                          .test(record.oldValue || ''))) continue;
+                addClosestTileCandidate(target, tiles);
+                continue;
+            }
+            if (record.type === 'characterData') {
+                addClosestTileCandidate(record.target && record.target.parentElement, tiles);
+                continue;
+            }
+            record.addedNodes.forEach(node => addTileCandidates(node, tiles));
+            // A removed child can turn a recycled renderer into a new/incomplete
+            // shell. Revisit only its nearest surviving card; querying the whole
+            // parent grid here would turn a one-card append back into a full scan.
+            addClosestTileCandidate(record.target, tiles);
+        }
+        return tiles;
+    }
+
+    function processTiles(tiles, force, checkProgress) {
+        const ctx = tileFilterContext();
+        ctx.checkProgress = checkProgress !== false;
+        if (!ctx.active) {
+            const managed = tiles
+                ? [...tiles].filter(tile => tile.dataset && tile.dataset.ytbFilterReason)
+                : document.querySelectorAll('[data-ytb-filter-reason]');
+            managed.forEach(tile => {
+                tile.classList.remove('ytb-removed');
+                delete tile.dataset.ytbFilterReason;
+                tileCache.delete(tile);
+            });
+            return tiles || null;
+        }
+        const candidates = tiles || collectAllTiles();
+        for (const tile of candidates) evaluateTile(tile, ctx, !!force);
+        return candidates;
+    }
+
+    function filterMutatedTiles(records) {
+        const tiles = collectMutationTiles(records);
+        if (retired || !settings.enabled || !tiles.size) return tiles;
+
+        if (WatchedDB) curChannelInfo = getChannelInfoFromChannelPage();
+        const gate = shouldGateNewTiles();
+        if (gate) {
+            tiles.forEach(tile => {
+                if (!tile.classList.contains('ytb-removed')) tile.classList.add(FILTER_PENDING_CLASS);
+            });
+        }
+
+        try {
+            // MutationObserver callbacks run before the next paint. Only dirty
+            // canonical cards are classified here; slower page/player work stays
+            // in the trailing maintenance pass.
+            processTiles(tiles, true);
+        } finally {
+            tiles.forEach(tile => tile.classList.remove(FILTER_PENDING_CLASS));
+        }
+        return tiles;
+    }
     // The in-player end-screen "video wall" uses its own markup (not ytd-* tiles)
     // and has no watched indicator, so apply the hidden-id and blocked-channel
     // lists here. (Use Ctrl+right-click to hide an individual one.)
@@ -1010,14 +1368,17 @@
         }
     }
 
+    const COMMENT_RENDERERS =
+        'ytd-comment-view-model, ytd-comment-renderer, ytm-comment-renderer';
+
     // Hide comments (and single replies) whose text matches the comment
     // keyword list. Same syntax as title keywords; hidden with .ytb-removed
     // so audit mode reveals them dimmed like everything else.
     function processComments() {
         if (!commentMatchers.length || location.pathname !== '/watch') return;
-        const comments = document.querySelectorAll(
-            'ytd-comment-view-model, ytd-comment-renderer, ytm-comment-renderer');
+        const comments = document.querySelectorAll(COMMENT_RENDERERS);
         for (const c of comments) {
+            observeFilterDetails(c);
             if (c.closest('.ytb-removed')) continue;
             const key = 'c' + configVersion;
             if (c.dataset.ytbCchk === key) continue;
@@ -1026,13 +1387,37 @@
             if (text && commentMatchers.some(fn => fn(text))) {
                 const thread = c.closest('ytd-comment-thread-renderer, ytm-comment-thread-renderer');
                 // Top-level comment: drop the whole thread. Reply: just it.
-                const top = thread && thread.querySelector(
-                    'ytd-comment-view-model, ytd-comment-renderer, ytm-comment-renderer');
+                const top = thread && thread.querySelector(COMMENT_RENDERERS);
                 hideEl(thread && c === top ? thread : c);
             } else {
                 c.dataset.ytbCchk = key;
             }
         }
+    }
+
+    // Comment text is frequently hydrated without inserting a new renderer.
+    // Invalidate only the affected comment cache, then let processComments skip
+    // every unchanged renderer instead of scheduling the full page pipeline.
+    function refreshMutatedComments(records) {
+        if (!commentMatchers.length || location.pathname !== '/watch') return;
+        const dirty = new Set();
+        const add = node => {
+            const el = node && node.nodeType === 1 ? node : node && node.parentElement;
+            if (!el || !el.closest) return;
+            const comment = el.matches && el.matches(COMMENT_RENDERERS)
+                ? el : el.closest(COMMENT_RENDERERS);
+            if (comment) dirty.add(comment);
+            if (el.querySelectorAll) {
+                el.querySelectorAll(COMMENT_RENDERERS).forEach(item => dirty.add(item));
+            }
+        };
+        for (const record of records) {
+            add(record.target);
+            if (record.addedNodes) record.addedNodes.forEach(add);
+        }
+        if (!dirty.size) return;
+        dirty.forEach(comment => { delete comment.dataset.ytbCchk; });
+        processComments();
     }
 
     /* ---- watch-page conveniences ------------------------------------- */
@@ -1070,8 +1455,8 @@
                 lastLactRefresh = Date.now();
                 const pw = window.wrappedJSObject;
                 if (pw && typeof pw._lact === 'number') pw._lact = Date.now();
-                // Chromium: the page global is out of reach; page-quality.js
-                // refreshes _lact for us.
+                // Chromium's isolated world cannot reach the page global;
+                // page-quality.js refreshes _lact in the MAIN world.
                 else window.postMessage({ type: 'ytb-lact' }, location.origin);
             }
         } catch (e) { /* page global unavailable */ }
@@ -1117,6 +1502,145 @@
     }
 
     /* ==================================================================
+     * 4a. Watched-video database: the robust, YouTube-independent signal.
+     *   - A timeupdate hook on the main player records the video you're
+     *     watching once playback passes the threshold, so the database is
+     *     built from your actual viewing rather than the flaky progress bar.
+     *   - On a channel page, a "Watched N / total" badge shows how many of
+     *     that channel's videos are in the database (denominator scraped
+     *     from the channel header).
+     * ================================================================== */
+    let watchedMarkedVid = null;      // last video already recorded this session
+
+    function ensureWatchedHook(v) {
+        if (!v || !WatchedDB || v.dataset.ytbWatchHook === INSTANCE_ID) return;
+        v.dataset.ytbWatchHook = INSTANCE_ID;
+        v.addEventListener('timeupdate', () => {
+            if (retired || !settings.enabled || !settings.hideWatched) return;
+            if (location.pathname !== '/watch' || isLivePlayer()) return;
+            const vid = watchVideoId();
+            if (!vid || vid === watchedMarkedVid) return;
+            const dur = v.duration, cur = v.currentTime;
+            if (!isFinite(dur) || dur <= 0) return;
+            if ((cur / dur) * 100 >= settings.watchedThreshold) {
+                watchedMarkedVid = vid;
+                WatchedDB.markWatched(vid);
+                const owner = getWatchPageOwnerInfo();
+                if (owner) WatchedDB.recordChannelVideo(owner, vid);
+            }
+        });
+    }
+
+    // "513 videos" from the channel header, across the most common UI
+    // languages, plus a CJK fallback. Thousands separators (',' '.' ' ')
+    // are stripped so "1,234 videos" -> 1234. Returns null if not shown.
+    const VIDEO_COUNT_RE = /([\d][\d., \s]*)\s*(?:videos?|vídeos?|vidéos?|videa|filmy|видео|βίντεο|video)\b/i;
+    const VIDEO_COUNT_CJK = /([\d][\d., \s]*)\s*(?:本の動画|個の動画|動画|部影片|個影片|个视频|部视频|视频|동영상|개의\s*동영상)/;
+
+    function channelHeaderEl() {
+        return document.querySelector('yt-page-header-renderer') ||
+               document.querySelector('ytd-browse[page-subtype="channels"] #page-header') ||
+               document.querySelector('ytm-c4-tabbed-header-renderer, .c4-tabbed-header') ||
+               document.querySelector('#channel-header');
+    }
+
+    function channelHeaderMetaEl() {
+        const header = channelHeaderEl();
+        if (!header) return null;
+        return header.querySelector('yt-content-metadata-view-model') ||
+               header.querySelector('#meta, #channel-header-container, .page-header-view-model-wiz__page-header-content') ||
+               header;
+    }
+
+    function parseChannelVideoTotal() {
+        // Read the metadata row (subscribers · videos), not the whole header —
+        // the header also carries the "Videos" tab label, which would misfire.
+        const header = channelHeaderMetaEl() || channelHeaderEl();
+        if (!header) return null;
+        const text = header.textContent || '';
+        const m = text.match(VIDEO_COUNT_RE) || text.match(VIDEO_COUNT_CJK);
+        if (!m) return null;
+        const n = parseInt(m[1].replace(/[., \s]/g, ''), 10);
+        return isNaN(n) ? null : n;
+    }
+
+    // The metadata row itself (handle · subscribers · videos). Used as the
+    // insertion anchor so our stats line sits directly beneath it, left-aligned
+    // and in the same font, rather than being crammed into the flex row.
+    function channelMetaViewModel() {
+        return document.querySelector('yt-page-header-renderer yt-content-metadata-view-model') ||
+               document.querySelector('#page-header yt-content-metadata-view-model') ||
+               null;
+    }
+
+    function removeChannelBadge() {
+        const el = document.getElementById('ytb-channel-stats');
+        if (el) el.remove();
+    }
+
+    function statSpan(label, value, tip) {
+        const span = document.createElement('span');
+        span.className = 'ytb-stat';
+        if (tip) span.title = tip;
+        span.appendChild(document.createTextNode(label + ' '));
+        const b = document.createElement('b');
+        b.textContent = value;
+        span.appendChild(b);
+        return span;
+    }
+
+    // A "Watched N / total  ·  Hidden M" line. Watched always shows on a channel
+    // page; Hidden only when there is at least one, to avoid clutter.
+    //
+    // CRITICAL: this must be idempotent. runAll fires on every DOM mutation, and
+    // this element lives inside the observed <body> subtree, so rebuilding it
+    // unconditionally makes every render trigger another pass — a runaway loop
+    // that pins the CPU and stops YouTube from loading thumbnails. So we only
+    // touch the DOM when the values (cached in a data-* attribute the childList
+    // observer ignores) or the placement actually change.
+    function renderChannelStats(watched, total, hidden) {
+        const meta = channelMetaViewModel();
+        const host = channelHeaderMetaEl();
+        if (!meta && !host) return;
+        const sig = watched + '/' + (total == null ? '?' : total) + '|' + hidden;
+        let el = document.getElementById('ytb-channel-stats');
+        const placedOk = !!el && (meta
+            ? (el.parentElement === meta.parentElement && el.previousElementSibling === meta)
+            : (el.parentElement === host));
+        if (el && el.dataset.ytbSig === sig && placedOk) return;   // nothing to do
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'ytb-channel-stats';
+        }
+        if (!placedOk) {
+            if (meta && meta.parentElement) meta.parentElement.insertBefore(el, meta.nextSibling);
+            else if (host) host.appendChild(el);
+        }
+        if (el.dataset.ytbSig === sig) return;   // placement fixed, content already current
+        el.dataset.ytbSig = sig;
+        el.textContent = '';
+        el.appendChild(statSpan('Watched',
+            (total != null && total > 0) ? (watched + ' / ' + total) : String(watched),
+            'Videos from this channel in your local watched history'));
+        if (hidden > 0) {
+            const sep = document.createElement('span');
+            sep.className = 'ytb-stat-sep';
+            sep.textContent = '•';
+            el.appendChild(sep);
+            el.appendChild(statSpan('Hidden', String(hidden),
+                'Videos from this channel you have hidden'));
+        }
+    }
+
+    function updateChannelWatchBadge() {
+        if (!WatchedDB || !curChannelInfo) { removeChannelBadge(); return; }
+        const total = parseChannelVideoTotal();
+        if (total != null) WatchedDB.setChannelTotal(curChannelInfo, total);
+        const stats = WatchedDB.getChannelStats(curChannelInfo) || { watched: 0, total: null, hidden: 0 };
+        renderChannelStats(stats.watched, stats.total != null ? stats.total : total, stats.hidden || 0);
+    }
+
+    /* ==================================================================
      * 4b. Community data (opt-in): SponsorBlock skipping, DeArrow titles/
      * thumbnails, Return YouTube Dislike counts. All lookups go through
      * the background script (see background.js for API/licence notes).
@@ -1131,7 +1655,7 @@
         ['music_offtopic', 'sbSkipOfftopic', 'non-music section'],
         ['filler', 'sbSkipFiller', 'filler']
     ];
-    let sbState = { vid: null, segments: null, pending: false };
+    let sbState = { vid: null, segments: null, pending: false, generation: 0 };
     let sbLastSkipAt = 0;
 
     function sbWantedCategories() {
@@ -1526,11 +2050,13 @@
         if (sbState.vid !== vid && !sbState.pending) {
             const cats = sbWantedCategories();
             if (!cats.length) return;
-            sbState = { vid, segments: null, pending: true };
+            const generation = sbCategoryGeneration;
+            sbState = { vid, segments: null, pending: true, generation };
             api.runtime.sendMessage({ action: 'ytb-sb-segments', videoId: vid, categories: cats })
                 .then((segs) => {
-                    if (sbState.vid !== vid) return;
-                    sbState = { vid, segments: segs || [], pending: false };
+                    if (retired || generation !== sbCategoryGeneration ||
+                        sbState.vid !== vid || sbState.generation !== generation) return;
+                    sbState = { vid, segments: segs || [], pending: false, generation };
                     if (segs && segs.length) {
                         showVolumeOverlay('⏭ ' + segs.length +
                             (segs.length === 1 ? ' segment' : ' segments') +
@@ -1541,7 +2067,10 @@
                     if (document.getElementById('ytb-sb-panel')) renderSbPanel();
                 })
                 .catch(() => {
-                    if (sbState.vid === vid) sbState = { vid, segments: [], pending: false };
+                    if (generation === sbCategoryGeneration && sbState.vid === vid &&
+                        sbState.generation === generation) {
+                        sbState = { vid, segments: [], pending: false, generation };
+                    }
                 });
         }
         const v = playerVideo();
@@ -1596,15 +2125,64 @@
      * endpoint through the background, trickled a few per pass and cached,
      * so a busy feed does not burst the API.
      * ------------------------------------------------------------------ */
-    const sbBadgeCache = new Map();     // vid -> true | false | 'pending'
+    const sbBadgeCache = new Map();     // vid -> { generation, value }
+    const sbBadgeInFlight = new Set();  // "generation:vid"
     const SB_BADGE_MAX = 1000;
+    const SB_BADGE_CONCURRENCY = 6;
+    let sbCategorySignature = '';
+    let sbCategoryGeneration = 0;
 
-    function sbBadgeLookup(vid, cats) {
+    function refreshSbCategoryGeneration() {
+        const signature = sbWantedCategories().join('\u001f');
+        if (signature === sbCategorySignature) return;
+        sbCategorySignature = signature;
+        sbCategoryGeneration++;
+        sbBadgeCache.clear();
+        // A badge from the previous category set is not evidence for the new set.
+        document.querySelectorAll('.ytb-sb-badge').forEach(badge => badge.remove());
+    }
+
+    function sbBadgeValue(vid) {
+        const hit = sbBadgeCache.get(vid);
+        return hit && hit.generation === sbCategoryGeneration
+            ? hit.value : undefined;
+    }
+
+    function currentSbBadgeRequests() {
+        // Stale-generation requests still consume network capacity until their
+        // promises settle; keep the advertised global six-request ceiling.
+        return sbBadgeInFlight.size;
+    }
+
+    function sbBadgeLookup(vid, cats, tile) {
+        const generation = sbCategoryGeneration;
+        const requestKey = generation + ':' + vid;
+        if (sbBadgeInFlight.has(requestKey)) return;
         if (sbBadgeCache.size >= SB_BADGE_MAX) sbBadgeCache.delete(sbBadgeCache.keys().next().value);
-        sbBadgeCache.set(vid, 'pending');
+        sbBadgeCache.set(vid, { generation, value: 'pending' });
+        sbBadgeInFlight.add(requestKey);
         api.runtime.sendMessage({ action: 'ytb-sb-segments', videoId: vid, categories: cats })
-            .then(segs => sbBadgeCache.set(vid, !!(segs && segs.length)))
-            .catch(() => sbBadgeCache.set(vid, false));
+            .then(segs => {
+                if (retired || generation !== sbCategoryGeneration) return;
+                sbBadgeCache.set(vid, {
+                    generation,
+                    value: !!(segs && segs.length)
+                });
+                if (tile && getVideoIdFromNode(tile) === vid) {
+                    processSbBadges([tile]);
+                }
+            })
+            .catch(() => {
+                if (!retired && generation === sbCategoryGeneration) {
+                    sbBadgeCache.set(vid, { generation, value: false });
+                }
+            })
+            .finally(() => {
+                sbBadgeInFlight.delete(requestKey);
+                // An old generation freeing a slot must also wake the current
+                // queue, whose requests may have been waiting at the global cap.
+                if (!retired) queueTileEnhancements();
+            });
     }
 
     // The positioned box that hosts YouTube's own thumbnail overlays (the
@@ -1646,23 +2224,24 @@
         container.appendChild(makeSbBadge(vid));
     }
 
-    function processSbBadges() {
+    function processSbBadges(tiles) {
+        refreshSbCategoryGeneration();
         if (!settings.enabled || !settings.sbEnabled || !settings.sbThumbnailBadges ||
             !sbWantedCategories().length) {
-            if (document.querySelector('.ytb-sb-badge')) {
-                document.querySelectorAll('.ytb-sb-badge').forEach(b => b.remove());
-            }
+            document.querySelectorAll('.ytb-sb-badge').forEach(badge => badge.remove());
             return;
         }
         const cats = sbWantedCategories();
-        let dispatched = 0;
-        for (const tile of document.querySelectorAll(INNER_CONTAINERS)) {
-            if (tile.classList.contains('ytb-removed')) continue;
+        let available = Math.max(0, SB_BADGE_CONCURRENCY - currentSbBadgeRequests());
+        const candidates = tiles || document.querySelectorAll(INNER_CONTAINERS);
+        for (const tile of candidates) {
             const vid = getVideoIdFromNode(tile);
-            if (!vid) continue;
-            const has = sbBadgeCache.get(vid);
+            const stale = tile.querySelector('.ytb-sb-badge');
+            if (stale && (!vid || stale.dataset.vid !== vid)) stale.remove();
+            if (!vid || tile.closest('.ytb-removed')) continue;
+            const has = sbBadgeValue(vid);
             if (has === undefined) {
-                if (dispatched < 6) { dispatched++; sbBadgeLookup(vid, cats); }
+                if (available > 0) { available--; sbBadgeLookup(vid, cats, tile); }
                 continue;
             }
             if (has === 'pending') continue;
@@ -1678,14 +2257,30 @@
 
     /* ---- DeArrow: community titles (and optionally thumbnails) -------- */
     const deCache = new Map();          // vid -> {title, thumbTime} | 'pending'
+    const deInFlight = new Set();
     const DE_CACHE_MAX = 800;
+    const DE_CONCURRENCY = 6;
+    let deArrowAppliedTitles = !!document.querySelector('[data-ytb-de-title]');
+    let deArrowAppliedThumbs = !!document.querySelector('img[data-ytb-de-thumb]');
 
-    function deLookup(vid) {
+    function deLookup(vid, tile) {
+        if (deInFlight.has(vid)) return;
         if (deCache.size >= DE_CACHE_MAX) deCache.delete(deCache.keys().next().value);
         deCache.set(vid, 'pending');
+        deInFlight.add(vid);
         api.runtime.sendMessage({ action: 'ytb-de-branding', videoId: vid })
-            .then((res) => deCache.set(vid, res || {}))
-            .catch(() => deCache.set(vid, {}));
+            .then((res) => {
+                deCache.set(vid, res || {});
+                if (!retired && settings.enabled && tile &&
+                    getVideoIdFromNode(tile) === vid) {
+                    processDeArrow([tile]);
+                }
+            })
+            .catch(() => deCache.set(vid, {}))
+            .finally(() => {
+                deInFlight.delete(vid);
+                if (!retired) queueTileEnhancements();
+            });
     }
 
     function deTitleTarget(node) {
@@ -1698,73 +2293,450 @@
                node.querySelector('h3 a[title], h4');
     }
 
-    function applyDeArrowToTile(tile, vid, entry) {
-        tile.dataset.ytbDe = vid;
-        if (settings.deArrowTitles && entry.title) {
-            const el = deTitleTarget(tile);
-            if (el) {
-                // Write to the innermost element that carries YouTube's text
-                // colour (the attributed-string span in the new lockup, or
-                // yt-formatted-string in legacy tiles). Writing to an outer
-                // wrapper strips the coloured child and leaves dark text.
-                const target = el.querySelector(
-                    '.yt-core-attributed-string, .ytAttributedStringHost, yt-formatted-string'
-                ) || el;
-                target.textContent = entry.title;
-                const link = (el.matches && el.matches('a[title]')) ? el
-                    : (el.querySelector && el.querySelector('a[title]'));
-                if (link) link.setAttribute('title', entry.title);
-                else if (el.getAttribute && el.getAttribute('title') != null) el.setAttribute('title', entry.title);
+    function deArrowTextTarget(el) {
+        return el.querySelector(
+            '.yt-core-attributed-string, .ytAttributedStringHost, yt-formatted-string'
+        ) || el;
+    }
+
+    function currentDeArrowVideoId(el) {
+        const tile = el && el.closest && el.closest(INNER_CONTAINERS);
+        if (tile) return getVideoIdFromNode(tile);
+        return location.pathname === '/watch' ? watchVideoId() : null;
+    }
+
+    // YouTube recycles card elements. Compare against the exact value we wrote:
+    // if YouTube already hydrated video B, preserve B instead of restoring A.
+    function prepareDeArrowTitleIdentity(target, vid) {
+        const applied = target.dataset.ytbDeTitle;
+        if (applied && applied !== vid) {
+            const current = target.textContent || '';
+            const cached = deCache.get(applied);
+            const replacement = target.dataset.ytbDeAppliedTitle ||
+                (cached && cached !== 'pending' && cached.title) || '';
+            const replacementKnown = !!replacement;
+            const stillReplacement = replacementKnown && current === replacement;
+
+            // Equality is ambiguous: video B's native title may legitimately
+            // equal A's replacement. Leave it untouched and await hydration
+            // rather than risk overwriting a fully hydrated B title with A.
+            [
+                'data-ytb-de-title', 'data-ytb-de-applied-title',
+                'data-ytb-de-original-title', 'data-ytb-de-original-title-video',
+                'data-ytb-de-await-title', 'data-ytb-de-stale-title'
+            ].forEach(name => target.removeAttribute(name));
+
+            if (!replacementKnown || stillReplacement) {
+                target.dataset.ytbDeAwaitTitle = vid;
+                target.dataset.ytbDeStaleTitle = target.textContent || '';
+                return false;
             }
+            return true; // current is already video B's native title
         }
-        if (settings.deArrowThumbs && entry.thumbTime != null) {
-            const img = tile.querySelector('ytd-thumbnail img, yt-image img, img.yt-core-image, img');
-            if (img && img.src && !img.dataset.ytbDeThumb) {
-                img.dataset.ytbDeThumb = '1';
-                const orig = img.src;
-                img.addEventListener('error', () => { img.src = orig; }, { once: true });
-                img.src = 'https://dearrow-thumb.ajay.app/api/v1/getThumbnail?videoID=' +
-                          encodeURIComponent(vid) + '&time=' + entry.thumbTime;
+
+        const awaiting = target.dataset.ytbDeAwaitTitle;
+        if (!awaiting) return true;
+        const current = target.textContent || '';
+        if (awaiting !== vid) {
+            target.dataset.ytbDeAwaitTitle = vid;
+            target.dataset.ytbDeStaleTitle = current;
+            return false;
+        }
+        if (current === (target.dataset.ytbDeStaleTitle || '')) return false;
+        target.removeAttribute('data-ytb-de-await-title');
+        target.removeAttribute('data-ytb-de-stale-title');
+        return true;
+    }
+
+    function prepareDeArrowLinkIdentity(link, vid) {
+        const applied = link.dataset.ytbDeLinkTitle;
+        if (applied && applied !== vid) {
+            const current = link.getAttribute('title') || '';
+            const hasCurrent = link.hasAttribute('title') ? '1' : '0';
+            const cached = deCache.get(applied);
+            const replacement = link.dataset.ytbDeAppliedLinkTitle ||
+                (cached && cached !== 'pending' && cached.title) || '';
+            const replacementKnown = !!replacement;
+            const stillReplacement = replacementKnown &&
+                hasCurrent === '1' && current === replacement;
+
+            // As with visible text, an equal tooltip can already belong to B.
+            // Keep the current value until a later title mutation disambiguates it.
+            [
+                'data-ytb-de-link-title', 'data-ytb-de-applied-link-title',
+                'data-ytb-de-had-link-title', 'data-ytb-de-original-link-title',
+                'data-ytb-de-original-link-title-video',
+                'data-ytb-de-await-link-title', 'data-ytb-de-stale-link-title',
+                'data-ytb-de-stale-link-had-title'
+            ].forEach(name => link.removeAttribute(name));
+
+            if (!replacementKnown || stillReplacement) {
+                link.dataset.ytbDeAwaitLinkTitle = vid;
+                link.dataset.ytbDeStaleLinkTitle = link.getAttribute('title') || '';
+                link.dataset.ytbDeStaleLinkHadTitle =
+                    link.hasAttribute('title') ? '1' : '0';
+                return false;
             }
+            return true; // YouTube already supplied video B's link title
+        }
+
+        const awaiting = link.dataset.ytbDeAwaitLinkTitle;
+        if (!awaiting) return true;
+        const current = link.getAttribute('title') || '';
+        const hasCurrent = link.hasAttribute('title') ? '1' : '0';
+        if (awaiting !== vid) {
+            link.dataset.ytbDeAwaitLinkTitle = vid;
+            link.dataset.ytbDeStaleLinkTitle = current;
+            link.dataset.ytbDeStaleLinkHadTitle = hasCurrent;
+            return false;
+        }
+        if (current === (link.dataset.ytbDeStaleLinkTitle || '') &&
+            hasCurrent === link.dataset.ytbDeStaleLinkHadTitle) return false;
+        link.removeAttribute('data-ytb-de-await-link-title');
+        link.removeAttribute('data-ytb-de-stale-link-title');
+        link.removeAttribute('data-ytb-de-stale-link-had-title');
+        return true;
+    }
+
+    function prepareDeArrowThumbIdentity(img, vid) {
+        const applied = img.dataset.ytbDeThumb;
+        if (applied && applied !== vid) {
+            const current = img.src || '';
+            const replacement = img.dataset.ytbDeAppliedSrc || '';
+            const stillReplacement = current.includes('dearrow-thumb.ajay.app') &&
+                (!replacement || current === replacement);
+
+            if (stillReplacement) {
+                const originalVideo = img.dataset.ytbDeOriginalSrcVideo;
+                if (img.dataset.ytbDeOriginalSrc &&
+                    (!originalVideo || originalVideo === applied)) {
+                    img.src = img.dataset.ytbDeOriginalSrc;
+                }
+            }
+            [
+                'data-ytb-de-thumb', 'data-ytb-de-applied-src',
+                'data-ytb-de-original-src', 'data-ytb-de-original-src-video',
+                'data-ytb-de-thumb-failed', 'data-ytb-de-thumb-instance',
+                'data-ytb-de-thumb-error-owner',
+                'data-ytb-de-await-thumb', 'data-ytb-de-stale-src'
+            ].forEach(name => img.removeAttribute(name));
+
+            if (stillReplacement) {
+                img.dataset.ytbDeAwaitThumb = vid;
+                img.dataset.ytbDeStaleSrc = img.src || '';
+                return false;
+            }
+            return true; // current is already video B's native thumbnail
+        }
+
+        const awaiting = img.dataset.ytbDeAwaitThumb;
+        if (!awaiting) return true;
+        const current = img.src || '';
+        if (awaiting !== vid) {
+            img.dataset.ytbDeAwaitThumb = vid;
+            img.dataset.ytbDeStaleSrc = current;
+            return false;
+        }
+        if (current === (img.dataset.ytbDeStaleSrc || '')) return false;
+        img.removeAttribute('data-ytb-de-await-thumb');
+        img.removeAttribute('data-ytb-de-stale-src');
+        return true;
+    }
+
+    function applyDeArrowTitle(host, vid, title, titleElement) {
+        const el = titleElement || deTitleTarget(host);
+        if (!el) return;
+        // Write to the innermost element that carries YouTube's text colour.
+        const target = deArrowTextTarget(el);
+        if (prepareDeArrowTitleIdentity(target, vid)) {
+            const current = target.textContent || '';
+            if (target.dataset.ytbDeTitle !== vid ||
+                current !== target.dataset.ytbDeAppliedTitle) {
+                target.dataset.ytbDeOriginalTitle = current;
+                target.dataset.ytbDeOriginalTitleVideo = vid;
+            }
+            target.dataset.ytbDeTitle = vid;
+            target.dataset.ytbDeAppliedTitle = title;
+            if (current !== title) target.textContent = title;
+            deArrowAppliedTitles = true;
+        }
+
+        const link = (el.matches && el.matches('a')) ? el
+            : (el.querySelector && el.querySelector('a'));
+        if (link && prepareDeArrowLinkIdentity(link, vid)) {
+            const current = link.getAttribute('title') || '';
+            if (link.dataset.ytbDeLinkTitle !== vid ||
+                current !== link.dataset.ytbDeAppliedLinkTitle) {
+                link.dataset.ytbDeHadLinkTitle = link.hasAttribute('title') ? '1' : '0';
+                link.dataset.ytbDeOriginalLinkTitle = current;
+                link.dataset.ytbDeOriginalLinkTitleVideo = vid;
+            }
+            link.dataset.ytbDeLinkTitle = vid;
+            link.dataset.ytbDeAppliedLinkTitle = title;
+            if (current !== title) link.setAttribute('title', title);
+            deArrowAppliedTitles = true;
         }
     }
 
-    function processDeArrow() {
+    function restoreDeArrowTitles() {
+        if (!deArrowAppliedTitles) return;
+        document.querySelectorAll(
+            '[data-ytb-de-title], [data-ytb-de-await-title]'
+        ).forEach(target => {
+            const currentVideo = currentDeArrowVideoId(target);
+            const originalVideo = target.dataset.ytbDeOriginalTitleVideo ||
+                target.dataset.ytbDeTitle;
+            if (target.hasAttribute('data-ytb-de-title') &&
+                originalVideo && originalVideo === currentVideo &&
+                target.hasAttribute('data-ytb-de-original-title')) {
+                target.textContent = target.dataset.ytbDeOriginalTitle || '';
+            }
+            [
+                'data-ytb-de-title', 'data-ytb-de-applied-title',
+                'data-ytb-de-original-title',
+                'data-ytb-de-original-title-video', 'data-ytb-de-await-title',
+                'data-ytb-de-stale-title'
+            ].forEach(name => target.removeAttribute(name));
+        });
+        document.querySelectorAll(
+            '[data-ytb-de-link-title], [data-ytb-de-await-link-title]'
+        ).forEach(link => {
+            const currentVideo = currentDeArrowVideoId(link);
+            const originalVideo = link.dataset.ytbDeOriginalLinkTitleVideo ||
+                link.dataset.ytbDeLinkTitle;
+            if (link.hasAttribute('data-ytb-de-link-title') &&
+                originalVideo && originalVideo === currentVideo) {
+                if (link.dataset.ytbDeHadLinkTitle === '1') {
+                    link.setAttribute('title', link.dataset.ytbDeOriginalLinkTitle || '');
+                } else {
+                    link.removeAttribute('title');
+                }
+            }
+            [
+                'data-ytb-de-link-title', 'data-ytb-de-applied-link-title',
+                'data-ytb-de-had-link-title',
+                'data-ytb-de-original-link-title',
+                'data-ytb-de-original-link-title-video',
+                'data-ytb-de-await-link-title', 'data-ytb-de-stale-link-title',
+                'data-ytb-de-stale-link-had-title'
+            ].forEach(name => link.removeAttribute(name));
+        });
+        document.querySelectorAll('[data-ytb-de]').forEach(el =>
+            el.removeAttribute('data-ytb-de'));
+        deArrowAppliedTitles = false;
+    }
+
+    function restoreDeArrowThumbs() {
+        if (!deArrowAppliedThumbs) return;
+        document.querySelectorAll(
+            'img[data-ytb-de-thumb], img[data-ytb-de-await-thumb]'
+        ).forEach(img => {
+            const currentVideo = currentDeArrowVideoId(img);
+            const originalVideo = img.dataset.ytbDeOriginalSrcVideo ||
+                img.dataset.ytbDeThumb;
+            if (img.hasAttribute('data-ytb-de-thumb') &&
+                originalVideo && originalVideo === currentVideo &&
+                img.dataset.ytbDeOriginalSrc) {
+                img.src = img.dataset.ytbDeOriginalSrc;
+            }
+            [
+                'data-ytb-de-thumb', 'data-ytb-de-applied-src',
+                'data-ytb-de-original-src',
+                'data-ytb-de-original-src-video', 'data-ytb-de-thumb-failed',
+                'data-ytb-de-thumb-instance', 'data-ytb-de-thumb-error-owner',
+                'data-ytb-de-await-thumb', 'data-ytb-de-stale-src'
+            ].forEach(name => img.removeAttribute(name));
+        });
+        deArrowAppliedThumbs = false;
+    }
+
+    function prepareDeArrowTileIdentity(tile, vid) {
+        if (settings.deArrowTitles) {
+            const target = tile.querySelector(
+                '[data-ytb-de-title], [data-ytb-de-await-title]'
+            );
+            if (target) prepareDeArrowTitleIdentity(target, vid);
+            const link = tile.querySelector(
+                '[data-ytb-de-link-title], [data-ytb-de-await-link-title]'
+            );
+            if (link) prepareDeArrowLinkIdentity(link, vid);
+        }
+        if (settings.deArrowThumbs) {
+            const img = tile.querySelector(
+                'img[data-ytb-de-thumb], img[data-ytb-de-await-thumb]'
+            );
+            if (img) prepareDeArrowThumbIdentity(img, vid);
+        }
+    }
+
+    function applyDeArrowThumb(tile, vid, thumbTime) {
+        const img = tile.querySelector(
+            'ytd-thumbnail img, yt-image img, img.yt-core-image, img'
+        );
+        if (!img || !img.src || !prepareDeArrowThumbIdentity(img, vid) ||
+            img.dataset.ytbDeThumbFailed === vid) return;
+
+        const replacement =
+            'https://dearrow-thumb.ajay.app/api/v1/getThumbnail?videoID=' +
+            encodeURIComponent(vid) + '&time=' + thumbTime;
+        const current = img.src;
+        if (!current.includes('dearrow-thumb.ajay.app')) {
+            img.dataset.ytbDeOriginalSrc = current;
+            img.dataset.ytbDeOriginalSrcVideo = vid;
+        } else if (img.dataset.ytbDeOriginalSrc &&
+                   !img.dataset.ytbDeOriginalSrcVideo) {
+            // Adopt originals created by an older live content-script instance.
+            img.dataset.ytbDeOriginalSrcVideo = vid;
+        }
+        img.dataset.ytbDeThumb = vid;
+        img.dataset.ytbDeAppliedSrc = replacement;
+        img.dataset.ytbDeThumbInstance = INSTANCE_ID;
+        deArrowAppliedThumbs = true;
+
+        const restoreFailedThumb = () => {
+            if (!retired && img.dataset.ytbDeThumbInstance === INSTANCE_ID &&
+                img.dataset.ytbDeThumb === vid &&
+                getVideoIdFromNode(tile) === vid) {
+                img.dataset.ytbDeThumbFailed = vid;
+                if (img.dataset.ytbDeOriginalSrcVideo === vid &&
+                    img.dataset.ytbDeOriginalSrc) {
+                    img.src = img.dataset.ytbDeOriginalSrc;
+                }
+            }
+        };
+        if (img.dataset.ytbDeThumbErrorOwner !== INSTANCE_ID) {
+            img.dataset.ytbDeThumbErrorOwner = INSTANCE_ID;
+            img.addEventListener('error', restoreFailedThumb, { once: true });
+        }
+        if (current === replacement) {
+            // A fresh instance may adopt an old in-flight URL. Re-own its error
+            // handling, and repair immediately if the browser already failed it.
+            if (img.complete && img.naturalWidth === 0) restoreFailedThumb();
+            return;
+        }
+        img.src = replacement;
+    }
+
+    function applyDeArrowToTile(tile, vid, entry) {
+        if (settings.deArrowTitles && entry.title) {
+            applyDeArrowTitle(tile, vid, entry.title);
+        }
+        if (settings.deArrowThumbs && entry.thumbTime != null) {
+            applyDeArrowThumb(tile, vid, entry.thumbTime);
+        }
+    }
+
+    function processDeArrow(tiles) {
         if (!settings.deArrowTitles && !settings.deArrowThumbs) return;
-        let dispatched = 0;
-        for (const tile of document.querySelectorAll(INNER_CONTAINERS)) {
-            if (tile.classList.contains('ytb-removed')) continue;
+        let available = Math.max(0, DE_CONCURRENCY - deInFlight.size);
+        const candidates = tiles || document.querySelectorAll(INNER_CONTAINERS);
+        for (const tile of candidates) {
+            if (tile.closest('.ytb-removed')) continue;
             const vid = getVideoIdFromNode(tile);
             if (!vid) continue;
+            prepareDeArrowTileIdentity(tile, vid);
             const entry = deCache.get(vid);
             if (entry === undefined) {
-                // Trickle the lookups so a big feed doesn't burst the API.
-                if (dispatched < 6) { dispatched++; deLookup(vid); }
+                if (available > 0) { available--; deLookup(vid, tile); }
                 continue;
             }
             if (entry === 'pending' || (!entry.title && entry.thumbTime == null)) continue;
-            if (tile.dataset.ytbDe === vid) continue;
             applyDeArrowToTile(tile, vid, entry);
-        }
-        // Watch-page title.
-        if (settings.deArrowTitles && location.pathname === '/watch') {
-            const vid = watchVideoId();
-            const entry = vid && deCache.get(vid);
-            if (vid && entry === undefined) { deLookup(vid); return; }
-            if (!entry || entry === 'pending' || !entry.title) return;
-            const h1 = document.querySelector('ytd-watch-metadata h1 yt-formatted-string, h1.ytd-watch-metadata');
-            if (h1 && h1.dataset.ytbDe !== vid) {
-                h1.dataset.ytbDe = vid;
-                // Same rule as tiles: write to the coloured inner element,
-                // not an outer wrapper, so the title stays readable.
-                const target = h1.querySelector(
-                    '.yt-core-attributed-string, .ytAttributedStringHost, yt-formatted-string'
-                ) || h1;
-                target.textContent = entry.title;
-            }
         }
     }
 
+    function processDeArrowWatchPage() {
+        if (!settings.deArrowTitles || location.pathname !== '/watch') return;
+        const vid = watchVideoId();
+        const h1 = document.querySelector(
+            'ytd-watch-metadata h1 yt-formatted-string, h1.ytd-watch-metadata'
+        );
+        if (vid && h1) {
+            prepareDeArrowTitleIdentity(deArrowTextTarget(h1), vid);
+        }
+        const entry = vid && deCache.get(vid);
+        if (vid && entry === undefined) {
+            if (deInFlight.size < DE_CONCURRENCY) deLookup(vid);
+            return;
+        }
+        if (!entry || entry === 'pending' || !entry.title) return;
+        if (h1) applyDeArrowTitle(h1, vid, entry.title, h1);
+    }
+
+    // Community integrations still need to decorate appended cards. Keep a
+    // bounded dirty queue and keep no more than six lookups per integration in
+    // flight; duplicate cards remain queued until their shared lookup resolves.
+    function queueTileEnhancements(tiles, unresolvedOnly) {
+        if (tiles && tiles.size) {
+            tiles.forEach(tile => {
+                const syncDecorations = settings.enabled && (
+                    (settings.sbEnabled && settings.sbThumbnailBadges) ||
+                    settings.deArrowTitles || settings.deArrowThumbs
+                );
+                let vid = null;
+                if (syncDecorations) {
+                    vid = getVideoIdFromNode(tile);
+                    if (settings.sbEnabled && settings.sbThumbnailBadges) {
+                        const stale = tile.querySelector('.ytb-sb-badge');
+                        if (stale && (!vid || stale.dataset.vid !== vid)) stale.remove();
+                    }
+                    if (vid && (settings.deArrowTitles || settings.deArrowThumbs)) {
+                        // Href recycling is observed page-wide; retire decorations
+                        // for the previous identity in the same pre-paint microtask.
+                        prepareDeArrowTileIdentity(tile, vid);
+                    }
+                }
+                if (!unresolvedOnly) {
+                    pendingTileEnhancements.add(tile);
+                    return;
+                }
+                if (!vid) vid = getVideoIdFromNode(tile);
+                if (!vid) return;
+                const sbPending = settings.enabled && settings.sbEnabled &&
+                    settings.sbThumbnailBadges && sbWantedCategories().length &&
+                    (sbBadgeValue(vid) === undefined || sbBadgeValue(vid) === 'pending');
+                const dePending = settings.enabled &&
+                    (settings.deArrowTitles || settings.deArrowThumbs) &&
+                    (!deCache.has(vid) || deCache.get(vid) === 'pending');
+                if (sbPending || dePending) pendingTileEnhancements.add(tile);
+            });
+        }
+        if (retired || tileEnhancementTimer || !pendingTileEnhancements.size) return;
+        tileEnhancementTimer = setTimeout(() => {
+            tileEnhancementTimer = null;
+            if (retired) return;
+            const runBadges = settings.enabled && settings.sbEnabled &&
+                settings.sbThumbnailBadges && sbWantedCategories().length;
+            const runDeArrow = settings.enabled &&
+                (settings.deArrowTitles || settings.deArrowThumbs);
+            if (!runBadges && !runDeArrow) {
+                pendingTileEnhancements.clear();
+                return;
+            }
+
+            const batch = [];
+            for (const tile of pendingTileEnhancements) {
+                batch.push(tile);
+                if (batch.length >= 24) break;
+            }
+            if (runBadges) processSbBadges(batch);
+            if (runDeArrow) processDeArrow(batch);
+
+            for (const tile of batch) {
+                const vid = getVideoIdFromNode(tile);
+                const sbValue = sbBadgeValue(vid);
+                const sbDone = !runBadges ||
+                    (sbValue !== undefined && sbValue !== 'pending');
+                const deDone = !runDeArrow ||
+                    (deCache.has(vid) && deCache.get(vid) !== 'pending');
+                if (tile.isConnected === false || tile.closest('.ytb-removed') || !vid ||
+                    (sbDone && deDone)) {
+                    pendingTileEnhancements.delete(tile);
+                }
+            }
+            if (pendingTileEnhancements.size) queueTileEnhancements();
+        }, 250);
+    }
     /* ---- Return YouTube Dislike ---------------------------------------- */
     function formatCount(n) {
         if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
@@ -1875,10 +2847,17 @@
                 if (slider) slider.remove();
                 document.querySelectorAll('.ytb-cinema-btn, .ytb-extra-btn').forEach(b => b.remove());
                 document.querySelectorAll('.ytb-sb-badge').forEach(b => b.remove());
+                restoreDeArrowTitles();
+                restoreDeArrowThumbs();
+                removeChannelBadge();
                 clearLoop();
                 exitCinema();
                 return;
             }
+            // Channel identity of the current channel page (null elsewhere).
+            // Resolved once per pass and shared by the watched-database
+            // attribution and the "Watched N / total" badge.
+            curChannelInfo = WatchedDB ? getChannelInfoFromChannelPage() : null;
             // flattenRows() intentionally not called: physically moving every
             // tile out of its row generated add/remove churn and fought the
             // renderer. The display:contents CSS already reflows the grid.
@@ -1889,19 +2868,20 @@
             if (settings.hideMembersOnly) removeMembersOnly();
             if (settings.hidePaidVideos) removePaidVideos();
             if (settings.hideWatched && watchedAllowedHere()) {
-                processWatchedByProgressBar();
-                processWatchedByContainer();
+                processWatchedProgress();
             }
             // Page identity is only needed when channels are blocked; resolve it
             // once and share it between enrichment and blackout.
             const pageInfo = state.blockedChannels.length ? getCurrentPageChannelInfo() : null;
             enrichFromCurrentPage(pageInfo);   // learn missing identifiers, rebuild index if changed
-            processTiles();                    // then hide tiles using the enriched index
+            // Progress markers were handled by the single global marker pass
+            // above; avoid two per-card selector queries during full recovery.
+            const pageTiles = processTiles(null, false, false); // then apply ID/channel/title rules
             processEndScreen();                // and the in-player end-screen suggestions
             processComments();                 // comment keyword filtering (watch pages)
             // Menu scanning is expensive (*[role="menuitem"]); only do it shortly
             // after a press, when a menu may actually have opened.
-            if (Date.now() - lastPointerDown < 3000) injectBlockChannelMenuItem();
+            if (Date.now() - lastPointerDown < 3000) injectCustomMenuItems();
             processBlackout(pageInfo);
             if (settings.maxQuality && !blackoutActive) applyMaxQuality();
             applyVolumeBoost();
@@ -1913,20 +2893,25 @@
             preventIdlePause();
             enforceAutoplayOff();
             autoExpandDescription();
+            ensureWatchedHook(playerVideo());   // record the video being watched
+            updateChannelWatchBadge();          // "Watched N / total" on channel pages
             ensureSponsorBlock();
             updateSbMarkers();
-            processSbBadges();
-            processDeArrow();
+            if (!settings.deArrowTitles) restoreDeArrowTitles();
+            if (!settings.deArrowThumbs) restoreDeArrowThumbs();
+            const wantsTileEnhancements =
+                (settings.sbEnabled && settings.sbThumbnailBadges &&
+                 sbWantedCategories().length) ||
+                settings.deArrowTitles || settings.deArrowThumbs;
+            const enhancementTiles = wantsTileEnhancements
+                ? (pageTiles || collectAllTiles()) : null;
+            processSbBadges(enhancementTiles || undefined);
+            processDeArrowWatchPage(); // reserve a lookup slot for the visible video
+            processDeArrow(enhancementTiles || undefined);
+            if (enhancementTiles) queueTileEnhancements(enhancementTiles, true);
             processRyd();
         } catch (e) {
             console.warn('[YT Blocker] pass error:', e);
-        } finally {
-            // ALWAYS reveal anti-flash-hidden tiles, even if something above threw
-            // — otherwise a mid-pass error could leave watched-hidden content
-            // (e.g. the recommendations sidebar) stuck invisible until reload.
-            if (settings.enabled && settings.reduceFlashing && settings.hideWatched) {
-                try { revealRemainingWatched(); } catch (e) { /* ignore */ }
-            }
         }
     }
 
@@ -1936,6 +2921,9 @@
     function undoHideVideo(id) {
         const i = state.hiddenVideoIds.indexOf(id);
         if (i >= 0) state.hiddenVideoIds.splice(i, 1);
+        // Drop it from the per-channel "Hidden" tally too (hiding and watching
+        // are tracked separately, so this never touches the watched database).
+        if (WatchedDB) WatchedDB.removeHidden(id);
         unhideAll();   // pass re-hides anything that should stay hidden
         persist();
     }
@@ -1952,9 +2940,36 @@
         const id = getVideoIdFromNode(tile);
         if (!id) { toast('Could not read a video ID here.'); return; }
         if (!hiddenSet.has(id)) state.hiddenVideoIds.push(id);
+        // Count it against this video's channel (separate from watched).
+        if (WatchedDB) {
+            const chan = getChannelInfoFromNode(tile) || curChannelInfo;
+            if (chan) WatchedDB.recordChannelHidden(chan, id);
+        }
         removeTile(tile);
         persist();
         toast('Hid video', id, () => undoHideVideo(id));
+    }
+
+    // Add a video to the watched database (distinct from hiding it). Attributes
+    // it to the video's channel so the channel-page "Watched N / total" grows.
+    function markWatchedAtTarget(target) {
+        if (!WatchedDB) return;
+        const tile = findTileFromTarget(target);
+        let id = tile ? getVideoIdFromNode(tile) : null;
+        let chan = tile ? getChannelInfoFromNode(tile) : null;
+        if (!id && location.pathname === '/watch') {
+            id = watchVideoId();
+            chan = getWatchPageOwnerInfo();
+        }
+        if (!id) { toast('Could not read a video ID here.'); return; }
+        WatchedDB.markWatched(id);
+        if (chan) WatchedDB.recordChannelVideo(chan, id);
+        if (tile) removeTile(tile);   // watched videos are hidden
+        toast('Marked as watched', id, () => {
+            WatchedDB.remove(id);
+            unhideAll();
+            runAll();
+        });
     }
 
     function channelLabel(info) {
@@ -2108,6 +3123,7 @@
     }
 
     function onInjectedBlockClick(e) {
+        if (retired) return;
         e.preventDefault();
         e.stopPropagation();
         const info = e.currentTarget._info || resolveMenuChannelInfo();
@@ -2132,48 +3148,113 @@
         return e;
     }
 
-    function buildMenuItem(info) {
+    // Video the currently-open menu belongs to (its owner tile, or the main
+    // watch video when the menu was opened from the video's own metadata).
+    function resolveMenuVideoId() {
+        if (menuOwnerTile) return getVideoIdFromNode(menuOwnerTile);
+        if (menuOwnerIsMain) return watchVideoId();
+        return null;
+    }
+
+    // Outline icons (stroked via .ytb-mi-icon svg CSS) matching native menu items.
+    function drawBlockIcon(svg) {
+        svg.appendChild(svgEl('circle', { cx: 12, cy: 12, r: 9 }));
+        svg.appendChild(svgEl('line', { x1: 5.6, y1: 5.6, x2: 18.4, y2: 18.4 }));
+    }
+    function drawWatchedIcon(svg) {   // check inside a circle
+        svg.appendChild(svgEl('circle', { cx: 12, cy: 12, r: 9 }));
+        svg.appendChild(svgEl('polyline', { points: '7.8 12.4 10.8 15.4 16.2 9' }));
+    }
+    function drawHideIcon(svg) {      // eye with a slash through it
+        svg.appendChild(svgEl('path', { d: 'M3 12s3.6-6 9-6 9 6 9 6-3.6 6-9 6-9-6-9-6Z' }));
+        svg.appendChild(svgEl('circle', { cx: 12, cy: 12, r: 2.6 }));
+        svg.appendChild(svgEl('line', { x1: 4, y1: 4, x2: 20, y2: 20 }));
+    }
+
+    function buildMenuItem(label, drawIcon, onClick) {
         const el = document.createElement('div');
         el.className = 'ytb-menu-item';
         el.setAttribute('role', 'menuitem');
         el.tabIndex = 0;
-        el._info = info;
         el._ownerTile = menuOwnerTile;
+        el.dataset.ytbInstance = INSTANCE_ID;
         const icon = document.createElement('div');
         icon.className = 'ytb-mi-icon';
-        const svg = svgEl('svg', { viewBox: '0 0 24 24', 'stroke-width': '2', 'stroke-linecap': 'round' });
-        svg.appendChild(svgEl('circle', { cx: 12, cy: 12, r: 9 }));
-        svg.appendChild(svgEl('line', { x1: 5.6, y1: 5.6, x2: 18.4, y2: 18.4 }));
+        const svg = svgEl('svg', {
+            viewBox: '0 0 24 24', 'stroke-width': '2',
+            'stroke-linecap': 'round', 'stroke-linejoin': 'round'
+        });
+        drawIcon(svg);
         icon.appendChild(svg);
         const text = document.createElement('div');
         text.className = 'ytb-mi-text';
-        text.textContent = 'Block channel';
+        text.textContent = label;
         el.appendChild(icon);
         el.appendChild(text);
-        el.addEventListener('click', onInjectedBlockClick);
+        el.addEventListener('click', onClick);
         el.addEventListener('keydown', (ev) => {
-            if (ev.key === 'Enter' || ev.key === ' ') onInjectedBlockClick(ev);
+            if (ev.key === 'Enter' || ev.key === ' ') onClick(ev);
         });
         return el;
     }
 
-    function injectBlockChannelMenuItem() {
+    function onInjectedMarkWatchedClick(e) {
+        if (retired) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const id = resolveMenuVideoId();
+        const chan = resolveMenuChannelInfo();
+        closeNativeMenu();
+        if (!WatchedDB || !id) { toast('Could not read a video for this menu.'); return; }
+        WatchedDB.markWatched(id);
+        if (chan) WatchedDB.recordChannelVideo(chan, id);
+        if (menuOwnerTile) removeTile(menuOwnerTile);
+        toast('Marked as watched', id, () => { WatchedDB.remove(id); unhideAll(); runAll(); });
+    }
+
+    function onInjectedHideClick(e) {
+        if (retired) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const id = resolveMenuVideoId();
+        const chan = resolveMenuChannelInfo();
+        closeNativeMenu();
+        if (!id) { toast('Could not read a video for this menu.'); return; }
+        if (!hiddenSet.has(id)) state.hiddenVideoIds.push(id);
+        if (WatchedDB && chan) WatchedDB.recordChannelHidden(chan, id);
+        if (menuOwnerTile) removeTile(menuOwnerTile);
+        persist();
+        toast('Hid video', id, () => undoHideVideo(id));
+    }
+
+    // Our custom rows, in display order. "Mark as watched" / "Hide video" are
+    // omitted from the main watch video's own menu (you can't usefully hide the
+    // video you're on); "Block channel" applies everywhere.
+    function injectCustomMenuItems() {
         const menu = findOpenVideoMenu();
         if (!menu) {
-            // No video menu open — drop any stray injected item.
+            // No video menu open — drop any stray injected items.
             document.querySelectorAll('.ytb-menu-item').forEach(el => el.remove());
             return;
         }
         const existing = menu.container.querySelector('.ytb-menu-item');
         if (existing) {
-            if (existing._ownerTile === menuOwnerTile) return;  // still the same menu
-            existing.remove();                                  // owner changed — refresh
+            if (existing.dataset.ytbInstance === INSTANCE_ID &&
+                existing._ownerTile === menuOwnerTile) return;   // still the same menu
+            menu.container.querySelectorAll('.ytb-menu-item').forEach(el => el.remove());
         }
-        const item = buildMenuItem(resolveMenuChannelInfo());
-        if (menu.dnr && menu.dnr.parentNode === menu.container) {
-            menu.container.insertBefore(item, menu.dnr.nextSibling);
-        } else {
-            menu.container.appendChild(item);
+        const items = [];
+        if (WatchedDB && menuOwnerTile) {
+            items.push(buildMenuItem('Mark as watched', drawWatchedIcon, onInjectedMarkWatchedClick));
+        }
+        if (menuOwnerTile) {
+            items.push(buildMenuItem('Hide video', drawHideIcon, onInjectedHideClick));
+        }
+        items.push(buildMenuItem('Block channel', drawBlockIcon, onInjectedBlockClick));
+        const anchor = (menu.dnr && menu.dnr.parentNode === menu.container) ? menu.dnr.nextSibling : null;
+        for (const item of items) {
+            if (anchor) menu.container.insertBefore(item, anchor);
+            else menu.container.appendChild(item);
         }
     }
 
@@ -2262,6 +3343,7 @@
     }
 
     function clearBlackout() {
+        if (retired) return;
         if (!blackoutActive && !document.getElementById('ytb-blackout-panel')) return;
         blackoutActive = false;
         document.querySelectorAll('.ytb-blackout').forEach(el => el.classList.remove('ytb-blackout'));
@@ -2300,17 +3382,16 @@
 
     /* ==================================================================
      * 5d. Force the player to the highest available quality, once per video.
-     *     The player API lives in the page world. Firefox exposes it to the
-     *     content script via wrappedJSObject; Chromium content scripts are
-     *     fully isolated, so there the request is relayed by postMessage to
-     *     src/page-quality.js (a MAIN-world script, Chromium manifest only),
-     *     which answers "done" once the player accepted the change.
+     *     Firefox exposes the page-world player API via wrappedJSObject.
+     *     Chromium uses page-quality.js in the MAIN world and relays requests
+     *     and completion messages through postMessage.
      * ================================================================== */
-    window.addEventListener('message', (e) => {
-        if (e.source === window && e.data && e.data.type === 'ytb-max-quality-done' && e.data.vid) {
-            lastQualityVideoId = e.data.vid;
-        }
-    });
+    function onPageQualityMessage(e) {
+        if (retired || e.source !== window || !e.data ||
+            e.data.type !== 'ytb-max-quality-done' || !e.data.vid) return;
+        lastQualityVideoId = e.data.vid;
+    }
+    window.addEventListener('message', onPageQualityMessage);
 
     function applyMaxQuality() {
         if (location.pathname !== '/watch') return;
@@ -2668,9 +3749,8 @@
     function setPlaybackRate(v, rate) {
         try {
             // Within the range YouTube's own API accepts, go through it so the
-            // player UI stays in sync; the element rate covers the rest. On
-            // Chromium the player API is out of reach, so page-quality.js
-            // makes the call from the page world instead.
+            // player UI stays in sync; the element rate covers the rest.
+            // Chromium delegates the page-world call to page-quality.js.
             const p = document.getElementById('movie_player');
             const pApi = p && (p.wrappedJSObject || p);
             if (rate >= 0.25 && rate <= 2) {
@@ -2993,6 +4073,10 @@
         e.preventDefault();
         e.stopPropagation();
         if (!hiddenSet.has(id)) state.hiddenVideoIds.push(id);
+        if (WatchedDB) {   // count against the channel (separate from watched)
+            const chan = tile ? getChannelInfoFromNode(tile) : curChannelInfo;
+            if (chan) WatchedDB.recordChannelHidden(chan, id);
+        }
         if (still) still.style.display = 'none';
         else removeTile(tile);
         persist();
@@ -3059,21 +4143,28 @@
     }, true);
 
     api.runtime.onMessage.addListener((msg) => {
-        if (!msg || !msg.action) return;
+        if (retired || !msg || !msg.action) return;
         switch (msg.action) {
             case 'ytb-block-channel': blockChannelAtTarget(lastContextTarget); break;
             case 'ytb-hide-video':    hideVideoAtTarget(lastContextTarget); break;
+            case 'ytb-mark-watched':  markWatchedAtTarget(lastContextTarget); break;
         }
     });
 
     api.storage.onChanged.addListener((changes, area) => {
-        if (area !== 'local' || !changes[STORAGE_KEY]) return;
+        if (retired || area !== 'local' || !changes[STORAGE_KEY]) return;
         const incoming = JSON.stringify(normalize(changes[STORAGE_KEY].newValue));
         if (incoming === lastSerialized) return;     // our own write echoing back
         lastSerialized = incoming;
         state = normalize(changes[STORAGE_KEY].newValue);
         rebuildDerived();
         runAll();
+    });
+
+    // watched-db.js emits after cross-tab additions/removals and generation
+    // resets. Its revision joins the cache key so existing cards reconcile.
+    document.addEventListener('ytb-watched-db-change', () => {
+        if (!retired && settings.enabled) runAll();
     });
 
     /* ==================================================================
@@ -3098,39 +4189,211 @@
     /* ==================================================================
      * 9. Boot
      * ================================================================== */
+    function isExtensionMutationNode(node) {
+        const el = node && node.nodeType === 1 ? node : node && node.parentElement;
+        return !!(el && el.closest &&
+            el.closest('[id^="ytb-"], .ytb-menu-item, .ytb-sb-badge'));
+    }
+
+    function addLegacyMutationCandidates(node, candidates, includeDescendants) {
+        const el = node && node.nodeType === 1 ? node : node && node.parentElement;
+        if (!el) return;
+        if (el.matches && el.matches(LEGACY_MUTATION_CONTAINERS)) candidates.add(el);
+        const closest = el.closest && el.closest(LEGACY_MUTATION_CONTAINERS);
+        if (closest) candidates.add(closest);
+        if (includeDescendants && el.querySelectorAll) {
+            el.querySelectorAll(LEGACY_MUTATION_CONTAINERS)
+                .forEach(candidate => candidates.add(candidate));
+        }
+    }
+
+    // Shelves and promo renderers are outside the normal video-card selector.
+    // Hide matching insertions in this observer turn so they cannot paint during
+    // the 250 ms legacy maintenance debounce.
+    function processLegacyMutationFilters(records) {
+        if (!settings.enabled) return;
+        const candidates = new Set();
+        for (const record of records) {
+            if (record.type !== 'childList') continue;
+            addLegacyMutationCandidates(record.target, candidates, false);
+            record.addedNodes.forEach(node =>
+                addLegacyMutationCandidates(node, candidates, true));
+        }
+        for (const candidate of candidates) {
+            if (candidate.matches(NON_VIDEO_CARDS)) {
+                if (settings.hidePromos) {
+                    hideEl(candidate.closest(OUTER_GRID_CELLS) || candidate);
+                }
+                continue;
+            }
+            if (candidate.matches('ytd-rich-section-renderer')) {
+                if (settings.blockShorts || settings.hideNewsShelves) hideEl(candidate);
+                continue;
+            }
+            if (settings.blockShorts && candidate.matches(
+                'ytd-rich-shelf-renderer[is-shorts], ytd-reel-shelf-renderer, ' +
+                'ytm-reel-shelf-renderer'
+            )) hideEl(candidate);
+        }
+    }
+    function mutationTouchesLegacyContainer(node) {
+        const el = node && node.nodeType === 1 ? node : node && node.parentElement;
+        if (!el) return false;
+        if (el.matches && el.matches(LEGACY_MUTATION_CONTAINERS)) return true;
+        if (el.closest && el.closest(LEGACY_MUTATION_CONTAINERS)) return true;
+        return !!(el.querySelector && el.querySelector(LEGACY_MUTATION_CONTAINERS));
+    }
+
+    function isLocallyHandledMutationNode(node) {
+        if (isExtensionMutationNode(node)) return true;
+        const el = node && node.nodeType === 1 ? node : node && node.parentElement;
+        if (el && el.closest &&
+            (el.closest(INNER_CONTAINERS) || el.closest(COMMENT_RENDERERS))) return true;
+        if (el && el.matches &&
+            (el.matches(INNER_CONTAINERS) || el.matches(COMMENT_RENDERERS))) return true;
+        return !!(node && node.querySelector &&
+            (node.querySelector(INNER_CONTAINERS) || node.querySelector(COMMENT_RENDERERS)));
+    }
+
+    function mutationNeedsMaintenance(records) {
+        for (const record of records) {
+            if (record.type === 'attributes') {
+                // Tile href/title/style changes are fully handled by the pre-paint
+                // classifier. An href elsewhere can affect end screens or menus.
+                if (record.attributeName === 'href' &&
+                    !isLocallyHandledMutationNode(record.target)) return true;
+                continue;
+            }
+            if (record.type === 'characterData') {
+                if (!isLocallyHandledMutationNode(record.target)) return true;
+                continue;
+            }
+            let hasNodes = false;
+            for (const node of record.addedNodes) {
+                hasNodes = true;
+                if (mutationTouchesLegacyContainer(node) ||
+                    !isLocallyHandledMutationNode(node)) return true;
+            }
+            for (const node of record.removedNodes) {
+                hasNodes = true;
+                if (!isLocallyHandledMutationNode(node) &&
+                    !isLocallyHandledMutationNode(record.target)) return true;
+            }
+            if (!hasNodes && !isLocallyHandledMutationNode(record.target)) return true;
+        }
+        return false;
+    }
+
+    function retireInstance() {
+        retired = true;
+        window.removeEventListener('message', onPageQualityMessage);
+        if (pageObserver) {
+            pageObserver.disconnect();
+            pageObserver = null;
+        }
+        if (detailObserver) {
+            detailObserver.disconnect();
+            detailObserver = null;
+        }
+        detailObserved = new WeakSet();
+        if (maintenanceTimer) {
+            clearTimeout(maintenanceTimer);
+            maintenanceTimer = null;
+        }
+        if (tileEnhancementTimer) {
+            clearTimeout(tileEnhancementTimer);
+            tileEnhancementTimer = null;
+        }
+        pendingTileEnhancements.clear();
+        document.querySelectorAll('.ytb-menu-item').forEach(el => {
+            if (el.dataset.ytbInstance === INSTANCE_ID) el.remove();
+        });
+        while (lifecycleIntervals.length) clearInterval(lifecycleIntervals.pop());
+        if (boostSaveTimer) { clearTimeout(boostSaveTimer); boostSaveTimer = null; }
+        if (speedSaveTimer) { clearTimeout(speedSaveTimer); speedSaveTimer = null; }
+        if (sbNoticeTimer) { clearTimeout(sbNoticeTimer); sbNoticeTimer = null; }
+        if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+        ['ytb-sb-notice', 'ytb-sb-panel', 'ytb-toast'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+        });
+        exitCinema();
+        endFilterBoot();
+    }
+
     function bootObserver() {
+        if (retired) {
+            endFilterBoot();
+            return;
+        }
         if (!document.body) {
             requestAnimationFrame(bootObserver);
             return;
         }
-        // Debounce: coalesce bursts of mutations — and our own tile removals —
-        // into a single pass after things settle, instead of running every
-        // frame. This is what keeps channel pages with thousands of tiles from
-        // locking up (each pass does several full-document scans).
-        let debounceTimer = null;
+
         let pendingWhileHidden = false;
-        // Background watch pages still need passes so a blocked channel's
-        // video gets blacked out / paused before it racks up watch time.
         const mustRunHidden = () =>
             settings.enabled &&
             settings.blackoutBlockedChannels &&
             state.blockedChannels.length &&
             location.pathname === '/watch';
-        const schedule = () => {
-            // Don't burn CPU scanning a background tab; catch up on return.
-            if (document.hidden && !mustRunHidden()) { pendingWhileHidden = true; return; }
-            if (debounceTimer) return;
-            debounceTimer = setTimeout(() => { debounceTimer = null; runAll(); }, 200);
+
+        const scheduleMaintenance = (records) => {
+            if (retired) return;
+
+            // Fast path: classify only changed cards during the observer
+            // microtask, before Firefox can paint them.
+            if (!document.hidden) {
+                processLegacyMutationFilters(records);
+                const dirtyTiles = filterMutatedTiles(records);
+                refreshMutatedComments(records);
+                queueTileEnhancements(dirtyTiles);
+            }
+
+            if (document.hidden) {
+                pendingWhileHidden = true;
+                if (!mustRunHidden()) return;
+            }
+            if (!mutationNeedsMaintenance(records)) return;
+
+            // A real trailing debounce lets a Polymer stamping burst settle.
+            // The periodic safety pass below prevents starvation on a page that
+            // mutates continuously.
+            if (maintenanceTimer) clearTimeout(maintenanceTimer);
+            maintenanceTimer = setTimeout(() => {
+                maintenanceTimer = null;
+                runAll();
+            }, 250);
         };
-        // Only react to added/removed nodes. Watching attribute churn
-        // (style/class) fired constantly on YouTube and dominated CPU; the
-        // interval below is the safety net for anything attribute-driven.
-        const observer = new MutationObserver(schedule);
-        observer.observe(document.body, { childList: true, subtree: true });
-        runAll();
-        setInterval(() => { if (!document.hidden || mustRunHidden()) runAll(); }, 2000);
+
+        // High-frequency style/text changes are observed only inside known cards
+        // and comments. The page-wide observer keeps href recycling plus inserts.
+        detailObserver = new MutationObserver(scheduleMaintenance);
+        pageObserver = new MutationObserver(scheduleMaintenance);
+        pageObserver.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['href']
+        });
+
+        try {
+            runAll();
+        } finally {
+            endFilterBoot();
+        }
+
+        // Normal mutations and navigation events do the immediate work. This is
+        // only a low-frequency recovery pass for markup changes YouTube makes
+        // without inserting nodes.
+        lifecycleIntervals.push(setInterval(() => {
+            if (!document.hidden || mustRunHidden()) runAll();
+        }, 10000));
+
+
         document.addEventListener('visibilitychange', () => {
-            if (!document.hidden && pendingWhileHidden) {
+            if (retired || document.hidden) return;
+            if (pendingWhileHidden) {
                 pendingWhileHidden = false;
                 runAll();
             }
@@ -3146,30 +4409,39 @@
         document.addEventListener('yt-navigate-start', clearBlackout, true);
         document.addEventListener('yt-navigate-finish', runAll, true);
         let lastHref = location.href;
-        setInterval(() => {
-            if (location.href !== lastHref) {
-                lastHref = location.href;
-                redirectShortsUrl();
-            }
-        }, 500);
+        lifecycleIntervals.push(setInterval(() => {
+            if (retired || location.href === lastHref) return;
+            lastHref = location.href;
+            redirectShortsUrl();
+            if (!retired) runAll();
+        }, 500));
     }
-
     async function init() {
         // Tell any previous (orphaned) instance to stand down, THEN start
         // listening so a future update can retire us the same way. The
         // dispatch is synchronous, so ordering avoids retiring ourselves.
         try {
             document.dispatchEvent(new CustomEvent(TAKEOVER_EVENT));
-            document.addEventListener(TAKEOVER_EVENT, () => { retired = true; }, true);
+            document.addEventListener(TAKEOVER_EVENT, retireInstance, true);
         } catch (e) { /* ignore */ }
+
+        // Start both storage reads together. Settings can release the boot gate
+        // immediately when filtering is disabled, while enabled installs wait
+        // for the in-memory watched set before the first visible classification.
+        const watchedReady = WatchedDB
+            ? WatchedDB.whenReady().catch(() => {})
+            : Promise.resolve();
         try {
             const stored = await api.storage.local.get(STORAGE_KEY);
             state = normalize(stored[STORAGE_KEY]);
         } catch (e) {
             state = normalize(null);
         }
+        if (retired) return;
         lastSerialized = JSON.stringify(state);
         rebuildDerived();
+        await watchedReady;
+        if (retired) return;
         if (migrateLegacyLocalStorage()) persist();   // one-time import of old list
         bootObserver();
     }

@@ -88,7 +88,7 @@
         els.reveal.checked = !!data.settings.revealHidden;
         els.wheelvol.checked = !!data.settings.wheelVolume;
         els.cinema.checked = !!data.settings.ytCinemaButton;
-        els.threshold.value = data.settings.watchedThreshold;
+        setThresholdValue(els.threshold, data.settings.watchedThreshold);
         // Twitch
         els.twEnabled.checked = !!data.settings.twEnabled;
         els.twChannels.textContent = data.twitchBlockedChannels.length;
@@ -104,6 +104,19 @@
         els.twClipHelper.checked = !!data.settings.twClipHelper;
         els.twMaxQuality.checked = !!data.settings.twMaxQuality;
         els.twHideExt.checked = !!data.settings.twHideExtensions;
+    }
+
+    // The threshold dropdown offers 70/80/90/95/100; a legacy install may hold
+    // another value, so surface it as an extra option rather than mis-snapping.
+    function setThresholdValue(sel, val) {
+        val = String(val);
+        if (![...sel.options].some(o => o.value === val)) {
+            const o = document.createElement('option');
+            o.value = val;
+            o.textContent = val + '% (current)';
+            sel.appendChild(o);
+        }
+        sel.value = val;
     }
 
     function status(msg, isErr) {

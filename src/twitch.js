@@ -50,7 +50,7 @@
         twAutoClaimDrops: true,
         twAutoClaimMoments: true,
         twAnonChat: false,
-        twEmotes: true,
+        twEmotes: false,
         twHideCarousel: true,
         twHideChat: false,
         twClipHelper: true,
@@ -815,8 +815,8 @@
     let lastSweptCfg = -1;
 
     // token -> { url, title } from BTTV / FFZ / 7TV. All three APIs are
-    // CORS-open, so no extra host permissions are needed; a 404 just means
-    // the channel isn't registered with that provider.
+    // fetched through the service worker's fixed, permissioned allowlist;
+    // a 404 just means the channel isn't registered with that provider.
     let emoteMap = new Map();
     let emoteChannelId = null;
     let emoteGlobalsLoaded = false;
@@ -1621,11 +1621,12 @@
     // so the chip appears on the next pass instead of after the 5-minute
     // recheck.
     const pageStreamStarts = Object.create(null);
-    let pageStreamStartAskedAt = 0;
+    const pageStreamStartAskedAt = Object.create(null);
     function streamStartFromApollo(login) {
         if (pageStreamStarts[login]) return pageStreamStarts[login];
-        if (Date.now() - pageStreamStartAskedAt > 5000) {
-            pageStreamStartAskedAt = Date.now();
+        const lastAsked = pageStreamStartAskedAt[login] || 0;
+        if (Date.now() - lastAsked > 5000) {
+            pageStreamStartAskedAt[login] = Date.now();
             window.postMessage({ type: 'ytbtw-stream-start-req', login }, location.origin);
         }
         return 0;
@@ -1655,7 +1656,8 @@
             if (existing) existing.remove();
             return;
         }
-        if (uptimeCache.login !== login || Date.now() - uptimeCache.at > 300000) {
+        const maxAge = uptimeCache.start ? 300000 : 5000;
+        if (uptimeCache.login !== login || Date.now() - uptimeCache.at > maxAge) {
             uptimeCache = {
                 login,
                 start: streamStartFromLdJson(login) || streamStartFromApollo(login),

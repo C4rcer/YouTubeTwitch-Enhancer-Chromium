@@ -79,8 +79,18 @@
         importFile: $('import-file'),
         copyBtn: $('copy-btn'),
         clearBtn: $('clear-btn'),
-        status: $('status')
+        status: $('status'),
+        watchedCount: $('watched-count'),
+        watchedExport: $('watched-export'),
+        watchedImport: $('watched-import'),
+        watchedImportFile: $('watched-import-file'),
+        watchedClear: $('watched-clear'),
+        watchedStatus: $('watched-status')
     };
+
+    // Watched-history database (src/watched-db.js). May be absent if the
+    // script failed to load; the section then reports "unavailable".
+    const WDB = window.YTBWatchedDB || null;
 
     const MAX_ROWS = 500;   // cap list rendering; the search box narrows it
 
@@ -147,9 +157,76 @@
         els.news.checked = !!data.settings.hideNewsShelves;
         els.spinner.checked = !!data.settings.hideSidebarSpinner;
         els.endscreen.checked = !!data.settings.hideEndScreen;
-        els.threshold.value = data.settings.watchedThreshold;
+        setThresholdValue(els.threshold, data.settings.watchedThreshold);
         els.sync.checked = !!data.settings.syncBlockLists;
         renderSyncStatus();
+    }
+
+    // The threshold is a fixed-choice dropdown (70/80/90/95/100), but a legacy
+    // install may hold another value (e.g. the old 75% default). Surface it as
+    // an extra option rather than silently snapping it to the wrong choice.
+    function setThresholdValue(sel, val) {
+        val = String(val);
+        if (![...sel.options].some(o => o.value === val)) {
+            const o = document.createElement('option');
+            o.value = val;
+            o.textContent = val + '% (current)';
+            sel.appendChild(o);
+        }
+        sel.value = val;
+    }
+
+    /* ---- watched-history database ---- */
+    function watchedStatus(msg, isErr) {
+        els.watchedStatus.textContent = msg;
+        els.watchedStatus.classList.toggle('err', !!isErr);
+        if (msg) setTimeout(() => { els.watchedStatus.textContent = ''; els.watchedStatus.classList.remove('err'); }, 4000);
+    }
+
+    async function updateWatchedCount() {
+        if (!WDB) { els.watchedCount.textContent = 'unavailable'; return; }
+        try {
+            els.watchedCount.textContent = (await WDB.getStoredCount()).toLocaleString();
+        } catch (e) {
+            els.watchedCount.textContent = '0';
+        }
+    }
+
+    async function doWatchedExport() {
+        if (!WDB) return;
+        await WDB.whenReady();
+        YTB.downloadJson(WDB.export(), 'youtube-watched-' + new Date().toISOString().slice(0, 10) + '.json');
+        watchedStatus('Exported watched history.');
+    }
+
+    function doWatchedImport(file) {
+        if (!WDB) return;
+        const reader = new FileReader();
+        reader.onload = async () => {
+            try {
+                const obj = JSON.parse(reader.result);
+                await WDB.whenReady();
+                const added = WDB.import(obj);
+                await WDB.flush();
+                await updateWatchedCount();
+                watchedStatus('Imported +' + added + ' watched videos (duplicates ignored).');
+            } catch (e) {
+                watchedStatus('Could not read that file — is it a watched-history export?', true);
+            }
+        };
+        reader.readAsText(file);
+    }
+
+    async function doWatchedClear() {
+        if (!WDB) return;
+        if (!confirm('Erase your entire local watched history? This cannot be undone.')) return;
+        try {
+            await WDB.clear();
+            await updateWatchedCount();
+            watchedStatus('Watched history cleared.');
+        } catch (e) {
+            watchedStatus('Could not clear watched history. Your existing data was kept.', true);
+        }
     }
 
     async function renderSyncStatus() {
@@ -560,6 +637,12 @@
         els.importFile.addEventListener('change', (e) => { if (e.target.files[0]) doImport(e.target.files[0]); e.target.value = ''; });
         els.copyBtn.addEventListener('click', doCopy);
         els.clearBtn.addEventListener('click', doClear);
+        if (WDB) {
+            els.watchedExport.addEventListener('click', doWatchedExport);
+            els.watchedImport.addEventListener('click', () => els.watchedImportFile.click());
+            els.watchedImportFile.addEventListener('change', (e) => { if (e.target.files[0]) doWatchedImport(e.target.files[0]); e.target.value = ''; });
+            els.watchedClear.addEventListener('click', doWatchedClear);
+        }
         wireSbUserId();
         YTB.onChanged((d) => { data = d; render(); });
     }
@@ -596,6 +679,7 @@
         data = await YTB.load();
         wire();
         render();
+        updateWatchedCount();
     }
 
     document.addEventListener('DOMContentLoaded', start);

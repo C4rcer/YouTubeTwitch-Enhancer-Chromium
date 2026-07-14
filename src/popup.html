@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>YouTube/Twitch Enhancer</title>
     <link rel="stylesheet" href="ui.css">
-    <!-- Fixed width sizes the desktop popup; cap at the viewport and
-         center in case a browser renders it full-width. -->
+    <!-- Fixed width sizes the desktop popup; cap at the viewport and center
+         in case a Chromium browser renders it full-width. -->
     <style>body { width: 340px; max-width: 100%; margin: 0 auto; }</style>
 </head>
 <body>
@@ -71,7 +71,13 @@
             </label>
             <div class="row" style="margin-top:8px;">
                 <span class="grow muted">Watched threshold</span>
-                <input type="number" id="set-threshold" min="1" max="100"> <span class="muted">%</span>
+                <select id="set-threshold">
+                    <option value="70">70%</option>
+                    <option value="80">80%</option>
+                    <option value="90">90%</option>
+                    <option value="95">95%</option>
+                    <option value="100">100%</option>
+                </select>
             </div>
         </div>
 
@@ -124,7 +130,7 @@
             </label>
             <label class="toggle">
                 <input type="checkbox" id="tw-anon">
-                <span class="t-text">Anonymous chat<small>You never appear in viewer lists; chat becomes read-only. Takes effect on reload</small></span>
+                <span class="t-text">Anonymous chat<small>Replaces Twitch chat sign-in with an anonymous login; your token is never stored. Read-only; reload required</small></span>
             </label>
             <label class="toggle">
                 <input type="checkbox" id="tw-emotes">

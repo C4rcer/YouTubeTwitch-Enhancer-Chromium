@@ -13,8 +13,8 @@
     'use strict';
 
     const api = (typeof browser !== 'undefined') ? browser : chrome;
-    const YT_PATTERNS = ['*://www.youtube.com/*'];
-    const TW_PATTERNS = ['*://www.twitch.tv/*'];
+    const YT_PATTERNS = ['https://www.youtube.com/*'];
+    const TW_PATTERNS = ['https://www.twitch.tv/*'];
     const HAS_MENUS = !!api.contextMenus;
 
     /* ---------------- context menus ---------------- */
@@ -30,6 +30,12 @@
             api.contextMenus.create({
                 id: 'ytb-hide-video',
                 title: 'Hide this video',
+                contexts: ['all'],
+                documentUrlPatterns: YT_PATTERNS
+            });
+            api.contextMenus.create({
+                id: 'ytb-mark-watched',
+                title: 'Mark video as watched',
                 contexts: ['all'],
                 documentUrlPatterns: YT_PATTERNS
             });
@@ -82,8 +88,8 @@
 
     /* ---------------- Community data proxies (opt-in features) ----------
      * SponsorBlock / DeArrow / Return YouTube Dislike lookups run here in
-     * the background so the page CSP never interferes and no extra host
-     * permissions are needed (all three APIs answer with open CORS).
+     * the background so the page CSP never interferes. The manifest declares
+     * only the two community API hosts used by these fixed requests.
      *   - SponsorBlock & DeArrow data: CC BY-NC-SA 4.0, by Ajay Ramachandran
      *     (https://sponsor.ajay.app). Lookups use the k-anonymity endpoints:
      *     only a 4-character sha256 prefix of the video ID leaves the browser.

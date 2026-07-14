@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YouTube/Twitch Enhancer",
-  "version": "4.6.0",
-  "description": "Block channels, categories & keywords on YouTube & Twitch. Hide Shorts & watched videos, auto-claim points & drops, player tools.",
+  "version": "4.8.0",
+  "description": "Enhance YouTube & Twitch: block channels, categories, tags & keywords; hide Shorts/watched videos; add player, chat & claim tools.",
 
   "minimum_chrome_version": "111",
 
@@ -15,42 +15,45 @@
 
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "contextMenus"
   ],
 
   "host_permissions": [
-    "*://www.youtube.com/*",
-    "*://www.twitch.tv/*",
-    "*://clips.twitch.tv/*",
-    "*://api.betterttv.net/*",
-    "*://api.frankerfacez.com/*",
-    "*://7tv.io/*"
+    "https://www.youtube.com/*",
+    "https://www.twitch.tv/*",
+    "https://clips.twitch.tv/*",
+    "https://sponsor.ajay.app/*",
+    "https://returnyoutubedislikeapi.com/*",
+    "https://api.betterttv.net/*",
+    "https://api.frankerfacez.com/*",
+    "https://7tv.io/*"
   ],
 
   "content_scripts": [
     {
-      "matches": ["*://www.youtube.com/*"],
-      "js": ["src/content.js"],
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["src/watched-db.js", "src/content.js"],
       "css": ["src/content.css"],
       "run_at": "document_start",
       "all_frames": false
     },
     {
-      "matches": ["*://www.youtube.com/*"],
+      "matches": ["https://www.youtube.com/*"],
       "js": ["src/page-quality.js"],
       "run_at": "document_start",
       "all_frames": false,
       "world": "MAIN"
     },
     {
-      "matches": ["*://www.twitch.tv/*", "*://clips.twitch.tv/*"],
+      "matches": ["https://www.twitch.tv/*", "https://clips.twitch.tv/*"],
       "js": ["src/twitch.js"],
       "css": ["src/twitch.css"],
       "run_at": "document_start",
       "all_frames": false
     },
     {
-      "matches": ["*://www.twitch.tv/*"],
+      "matches": ["https://www.twitch.tv/*"],
       "js": ["src/page-twitch.js"],
       "run_at": "document_start",
       "all_frames": false,

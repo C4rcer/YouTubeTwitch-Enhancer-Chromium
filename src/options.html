@@ -93,7 +93,7 @@
         </label>
         <label class="toggle">
             <input type="checkbox" id="set-watched">
-            <span class="t-text">Hide already-watched videos<small>Once the thumbnail progress bar passes the threshold — on the surfaces ticked below</small></span>
+            <span class="t-text">Hide already-watched videos<small>Hides a video once it's in your local watched history <b>or</b> its thumbnail progress bar passes the threshold — on the surfaces ticked below. Watching past the threshold adds it to the history so it stays hidden even after YouTube forgets. Right-click any video (or use its ⋮ menu) to <b>Mark as watched</b> or <b>Hide video</b>; a channel page shows your Watched and Hidden counts for that channel.</small></span>
         </label>
         <div class="subtoggles" id="watched-scopes">
             <label class="toggle"><input type="checkbox" id="set-w-home"><span class="t-text">Home feed</span></label>
@@ -104,8 +104,14 @@
             <label class="toggle"><input type="checkbox" id="set-w-playlists"><span class="t-text">Playlists / Watch Later</span></label>
         </div>
         <div class="row" style="margin-top:10px;">
-            <span class="grow muted">Watched threshold (%)</span>
-            <input type="number" id="set-threshold" min="1" max="100">
+            <span class="grow muted">Watched threshold — how much of a video counts as "watched"</span>
+            <select id="set-threshold">
+                <option value="70">70%</option>
+                <option value="80">80%</option>
+                <option value="90">90%</option>
+                <option value="95">95%</option>
+                <option value="100">100%</option>
+            </select>
         </div>
         <label class="toggle">
             <input type="checkbox" id="set-flash">
@@ -131,6 +137,26 @@
             <input type="checkbox" id="set-cinema">
             <span class="t-text">Cinema mode button<small>Adds a ◐ button to the player controls that darkens everything around the video. Esc or clicking the dark area exits.</small></span>
         </label>
+    </div>
+
+    <div class="section">
+        <h2>Watched history database</h2>
+        <div class="muted" style="font-size:11px;margin-bottom:10px;">
+            A local record of videos you've watched, kept separately from YouTube's own progress
+            bar so it survives YouTube losing or resetting your watch progress. Videos in here are
+            hidden on the surfaces ticked above. It persists indefinitely on this device and is
+            <b>not</b> synced (it can grow far past the sync quota).
+        </div>
+        <div class="row">
+            <span class="grow">Watched videos recorded: <b id="watched-count">…</b></span>
+        </div>
+        <div class="btn-grid" style="margin-top:8px;">
+            <button id="watched-export">⬇ Export watched</button>
+            <button id="watched-import">⬆ Import watched</button>
+            <button id="watched-clear" class="danger">🗑 Clear watched history</button>
+        </div>
+        <input type="file" id="watched-import-file" class="hidden-input" accept="application/json,.json">
+        <div class="status" id="watched-status"></div>
     </div>
 
     <div class="section">
@@ -213,9 +239,9 @@
         <h2>Community data <span class="muted" style="font-weight:400;font-size:11px;">(opt-in)</span></h2>
         <div class="muted" style="margin-bottom:10px;font-size:11px;">
             These features query free community-run services and are <b>off by default</b>.
-            SponsorBlock lookups send only a hashed prefix of the video ID (k-anonymity), so the
-            exact video you watch is not revealed; DeArrow and Return YouTube Dislike lookups send
-            the video ID. Data credits:
+            SponsorBlock segment and DeArrow title lookups send only a hashed prefix of the video
+            ID (k-anonymity). DeArrow thumbnail rendering and Return YouTube Dislike use the exact
+            video ID; SponsorBlock submissions send the video and segment details you choose. Data credits:
             <a href="https://sponsor.ajay.app" target="_blank" rel="noopener">SponsorBlock</a> &amp;
             <a href="https://dearrow.ajay.app" target="_blank" rel="noopener">DeArrow</a> by Ajay
             Ramachandran (licensed CC BY-NC-SA 4.0), and
@@ -281,7 +307,7 @@
         <h2>Import / Export / Sync</h2>
         <label class="toggle">
             <input type="checkbox" id="set-sync">
-            <span class="t-text">Sync block lists via browser sync<small>Channels, videos and keywords follow your browser's own sync (e.g. your Google account in Chrome). Settings stay per-device. <span id="sync-status"></span></small></span>
+            <span class="t-text">Sync block lists via browser sync<small>Channels, videos and keywords follow your browser account (for example, Chrome Sync). Settings stay per-device. Watched history is never synced. <span id="sync-status"></span></small></span>
         </label>
         <div class="btn-grid" style="margin-top:8px;">
             <button id="export-btn">⬇ Export to file</button>
@@ -302,6 +328,7 @@
     </div>
 
     <script src="common.js"></script>
+    <script src="watched-db.js"></script>
     <script src="options.js"></script>
 </body>
 </html>

@@ -2,14 +2,17 @@
 
 Take back your YouTube and Twitch feeds. Block whole channels and categories,
 hide videos by title keyword, remove Shorts, hide what you've already watched,
-auto-claim Twitch points and drops, and strip the clutter: all locally in your
-browser, with nothing collected or sent anywhere.
+auto-claim Twitch points and drops, and strip the clutter. There is no analytics,
+tracking, or developer backend; optional network features are disclosed below.
 
 This is the **Chromium (Manifest V3) port** for Chrome, Edge, Brave, Opera and
 Vivaldi (Chrome 111+). The Firefox add-on lives in its own repo,
 [`YouTubeTwitch-Enhancer`](https://github.com/C4rcer/YouTubeTwitch-Enhancer),
 which is the primary codebase; feature changes land there first and are ported
 here.
+
+This independent extension is not affiliated with or endorsed by YouTube,
+Google, Twitch, Amazon, or the named community services.
 
 **[♥ Support development on Ko-fi](https://ko-fi.com/carcer7378)**
 
@@ -31,9 +34,13 @@ here.
   available), best-effort at not registering a view.
 - **Remove all Shorts**: sidebar entry, channel tabs, shelves, and
   `/shorts/<id>` URLs auto-redirect to the normal `/watch` player.
-- **Hide already-watched videos** past a progress threshold (default 75%),
-  scoped per surface: Home, Subscriptions, Search, Related, Channel pages,
-  Playlists. Each is individually toggleable.
+- **Persistent watched history.** Videos watched past the selected threshold
+  (default 90%) are recorded locally, so they stay hidden even if YouTube later
+  forgets their progress. Scope Home, Subscriptions, Search, Related, Channel
+  pages and Playlists independently; mark a card watched from either its ⋮ menu
+  or the right-click menu, and see Watched/Hidden counts on channel pages.
+  Watched history can be exported, imported or cleared separately and is never
+  sent through browser sync.
 - **Reveal hidden (audit mode).** See everything the extension filtered,
   dimmed with a red outline, instead of removed.
 - **Master switch.** One toggle in the popup pauses everything instantly.
@@ -66,8 +73,10 @@ here.
 - **Import / export / sync.** One-click JSON export/import (merge, no
   duplicates) and optional **browser sync** (e.g. Chrome Sync) so your block
   lists follow your browser account. Settings stay per-device.
-- **Reduce flashing.** Watched videos are held hidden from first paint instead
-  of popping in and vanishing.
+- **Reduce flashing.** A layout-preserving pre-paint gate waits for settings,
+  watched history and initial classification before revealing cards. It fails
+  open after three seconds if storage is unavailable, while continuation batches
+  and later title/progress hydration are classified in the observer turn.
 
 ## Community data integrations (all off by default)
 
@@ -131,7 +140,7 @@ page.
 - **Anonymous chat (off by default).** Connects to chat as an anonymous user
   so you never appear in the viewer list. Chat becomes read-only while it's
   on; points still accrue.
-- **Third-party emotes.** BetterTTV, FrankerFaceZ and 7TV emotes (global sets
+- **Third-party emotes (opt-in).** BetterTTV, FrankerFaceZ and 7TV emotes (global sets
   plus the current channel's) render in chat, and a 😼 button opens a
   searchable picker. Privacy note: with this toggle on, emote lists are
   fetched from those three services, which see the channel you're watching.
@@ -178,6 +187,18 @@ Do **not** package it with `Compress-Archive`: on Windows PowerShell 5.1 that
 cmdlet stores entries with backslash separators (`icons\icon-16.png`), which
 the Chrome / Opera / Edge store validators reject because they can't resolve
 the manifest's `icons/` paths. `build.ps1` writes proper forward-slash entries.
+### Automated checks
+
+The regression suite has no npm dependencies:
+
+```powershell
+node --test --test-isolation=none tests/content-filter.test.js tests/watched-db.test.js
+```
+
+It covers 600-card channels, incremental continuation batches, hydration and
+renderer recycling, filter precedence, DeArrow/SponsorBlock identity and queue
+behaviour, watched-history sharding/retry, simultaneous tabs, distributed
+clears, migration and deterministic Undo convergence.
 
 ## Usage
 
@@ -197,7 +218,9 @@ the manifest's `icons/` paths. `build.ps1` writes proper forward-slash entries.
 | **Import from file** | Merges into your current list (no duplicates). |
 | **Copy JSON** | Copies the whole block list to the clipboard. |
 | **Clear everything** | Removes all blocked channels, hidden videos and keywords (keeps settings). |
-| **Browser sync** | Mirrors the block lists (not settings) to your browser account. |
+| **Browser sync** | Mirrors the block lists (not settings or watched history) to your browser account. |
+| **Export / Import watched** | Backs up or merges the separate local watched-history database. |
+| **Clear watched history** | Erases locally recorded watched IDs without changing block lists or settings. |
 
 The JSON format is identical to the Firefox add-on's, so block lists move
 freely between the two.
@@ -213,23 +236,30 @@ freely between the two.
 
 ## Privacy
 
-Everything runs locally. The extension collects **no data**, phones home to
-**nothing**, and requires no account. Your block list lives in
-`chrome.storage.local` (and, only if you enable it, `chrome.storage.sync`
-inside your own browser account). Scoped exceptions, each behind its own
-toggle, are described in [PRIVACY.md](PRIVACY.md): third-party emotes (BTTV /
-FFZ / 7TV), the community data features (SponsorBlock / DeArrow / RYD), and
-Twitch sidebar hover previews. With those toggles off, no feature makes any
-network request.
+The developer operates no analytics or backend and does not receive or sell
+user data. Block lists, settings and watched YouTube video IDs are stored
+locally in `chrome.storage.local`; watched history is never synced and can be
+exported or erased from Advanced settings. Browser sync and every third-party
+integration are optional. [PRIVACY.md](PRIVACY.md) documents the exact local
+data, network requests, identifiers and retention controls.
 
 ## How it works
 
-- **`src/content.js`** (YouTube) and **`src/twitch.js`** (Twitch) run at
-  `document_start`. A debounced `MutationObserver` plus a 2 s safety interval
-  re-runs the cleanup pass on infinite scroll / SPA navigation; passes are
-  skipped while the tab is hidden and caught up on focus. Tiles are hidden in
-  place (CSS) rather than removed, which is what makes audit mode and Undo
-  possible.
+- **`src/content.js`** runs at `document_start`. A static startup gate keeps
+  card geometry in place while settings and watched history load, with a
+  three-second fail-open. A page observer handles inserts and recycled links;
+  scoped card/comment observers handle progress, title, badge, thumbnail and
+  text hydration. Mutation batches are canonicalized and deduplicated before
+  synchronous classification, while unrelated page/player work uses a trailing
+  debounce and a 10 s recovery pass. SponsorBlock and DeArrow card work uses
+  persistent queues capped at six concurrent requests per service.
+- **`src/watched-db.js`** keeps watched IDs and Undo operations in 64 matching
+  storage shards. Quiet-window batching, bounded latency, retries and
+  generation-tagged cross-tab clears keep persistence outside the filtering hot
+  path and make Undo deterministic across tabs. Older layouts migrate
+  automatically.
+- **`src/twitch.js`** runs at `document_start` and keeps Chromium's dedicated
+  page-world bridges for Twitch internals.
 - **`src/page-quality.js`** and **`src/page-twitch.js`** (Chromium-specific)
   run in the page's MAIN world. Chromium content scripts are fully isolated
   from the page, so the content scripts can't reach YouTube's player API or
@@ -245,8 +275,9 @@ network request.
   enabled. It's loaded through the **`src/background-sw.js`** Manifest V3
   service-worker entry.
 - **`src/popup.*`**, **`src/options.*`** and **`src/twitch-options.*`** share
-  storage helpers in **`src/common.js`**; state lives under one `data` key
-  and syncs across contexts via `storage.onChanged`.
+  storage helpers in **`src/common.js`**; settings and block lists live under
+  one `data` key, while watched history uses separate sharded local keys.
+  Contexts converge through `storage.onChanged`.
 - Content-script instances are tagged with a per-load id and hand over via a
   takeover event, so in-place extension updates never leave orphaned handlers
   fighting the new version.
@@ -258,7 +289,8 @@ manifest.json                   — Manifest V3 (Chrome 111+)
 icons/icon-*.png                — manifest icons (Chromium rejects SVG there)
 icons/icon.svg                  — used by the popup/options/onboarding pages
 src/
-  content.js     content.css    — the on-page engine (YouTube)
+  content.js     content.css    — incremental on-page engine (YouTube)
+  watched-db.js                 — sharded local watched-history store
   twitch.js      twitch.css     — the on-page engine (Twitch)
   page-quality.js               — MAIN-world YouTube player helper (Chromium-only)
   page-twitch.js                — MAIN-world Twitch page-internals helper (Chromium-only)
@@ -270,6 +302,11 @@ src/
   twitch-options.html/.js       — full manager (Twitch)
   onboarding.html               — first-run guide
   ui.css                        — shared popup/options styling
+tests/
+  content-filter.test.js        — 600-card/incremental DOM regression harness
+  watched-db.test.js            — storage, retry and cross-tab regressions
+CHANGELOG.md                    — release changes
+STORE-LISTING.md                — Chrome Web Store fields and upload checklist
 ```
 
 ## Support

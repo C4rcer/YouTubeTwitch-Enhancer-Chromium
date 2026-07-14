@@ -13,7 +13,7 @@ const YTB = (function () {
         enabled: true,               // master switch for the whole extension
         blockShorts: true,
         hideWatched: true,
-        watchedThreshold: 75,
+        watchedThreshold: 90,
         // Per-surface scope for watched-hiding. Playlists default OFF because
         // seeing progress in Watch Later / playlists is usually the point.
         watchedHome: true,
@@ -68,7 +68,7 @@ const YTB = (function () {
         twAutoClaimMoments: true,    // auto-click "Claim Moment" chat callouts
         twAnonChat: false,           // connect to chat as an anonymous user (read-only;
                                      // you never appear in the viewer list). Needs reload.
-        twEmotes: true,              // render BTTV / FFZ / 7TV emotes in chat
+        twEmotes: false,             // opt in to BTTV / FFZ / 7TV network lookups
         twHideCarousel: true,        // hide (and pause) the front-page auto-playing carousel
         twHideChat: false,           // visually hide the chat column (stays in the DOM so
                                      // point claiming keeps working)
