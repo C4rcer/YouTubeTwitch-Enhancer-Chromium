@@ -134,11 +134,18 @@ class FakeRoot {
     }
 }
 
-function loadContentHarness(watched) {
+function loadContentHarness(watched, options = {}) {
     const listeners = {};
     const windowListeners = {};
     const postedMessages = [];
     const elements = new Map();
+    let nextTimeoutId = 1;
+    const timeouts = new Map();
+    const watchTitle = options.watchTitle || null;
+    const flexyData = options.flexyData || null;
+    const watchFlexy = flexyData ? {
+        getAttribute(name) { return name === 'video-id' ? flexyData.videoId : null; }
+    } : null;
     const rootAttributes = new Map();
     const documentElement = {
         dataset: {},
@@ -152,7 +159,11 @@ function loadContentHarness(watched) {
         body: new FakeRoot([]),
         addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
         dispatchEvent() { return true; },
-        querySelector() { return null; },
+        querySelector(selector) {
+            if (watchTitle && selector.includes('ytd-watch-metadata h1')) return watchTitle;
+            if (watchFlexy && selector === 'ytd-watch-flexy[video-id]') return watchFlexy;
+            return null;
+        },
         querySelectorAll() { return []; },
         getElementById(id) { return elements.get(id) || null; }
     };
@@ -189,8 +200,12 @@ function loadContentHarness(watched) {
         WeakMap,
         Promise,
         CustomEvent: class CustomEvent { constructor(type) { this.type = type; } },
-        setTimeout: () => 1,
-        clearTimeout() {},
+        setTimeout(fn) {
+            const id = nextTimeoutId++;
+            timeouts.set(id, fn);
+            return id;
+        },
+        clearTimeout(id) { timeouts.delete(id); },
         setInterval: () => 1,
         clearInterval() {},
         requestAnimationFrame() {},
@@ -213,6 +228,19 @@ function loadContentHarness(watched) {
         processLegacyMutationFilters,
         prepareDeArrowTitleIdentity,
         applyDeArrowTitle,
+        processDeArrowWatchPage,
+        beginDeArrowWatchNavigation,
+        finishDeArrowWatchNavigation,
+        refreshDeArrowWatchTitle,
+        setDeArrowCache(vid, value) { deCache.set(vid, value); },
+        completeWatchPlayerData(token, requestedVid, videoId, title) {
+            onPageQualityMessage({
+                source: window,
+                data: {
+                    type: 'ytb-video-data', token, requestedVid, videoId, title
+                }
+            });
+        },
         mutationNeedsMaintenance,
         applyMaxQuality,
         setPlaybackRate,
@@ -224,9 +252,10 @@ function loadContentHarness(watched) {
             });
         },
         setPath(path) {
-            location.pathname = path;
-            location.search = '';
-            location.href = location.origin + path;
+            const url = new URL(path, location.origin);
+            location.pathname = url.pathname;
+            location.search = url.search;
+            location.href = url.href;
         },
         setLocationSearch(search) {
             location.search = search;
@@ -257,6 +286,14 @@ function loadContentHarness(watched) {
     vm.runInContext(source, context, { filename: CONTENT_PATH });
     return Object.assign(context.__YTB_FILTER_TEST__, {
         postedMessages,
+        runLatestTimeout() {
+            const ids = Array.from(timeouts.keys());
+            const id = ids[ids.length - 1];
+            assert.ok(id, 'expected a scheduled timeout');
+            const fn = timeouts.get(id);
+            timeouts.delete(id);
+            fn();
+        },
         setElement(id, element) {
             if (element == null) elements.delete(id);
             else elements.set(id, element);
@@ -698,4 +735,140 @@ test('DeArrow originals follow video identity and native rehydration', () => {
         'recycling must never overwrite an already-hydrated B title with A');
     api.applyDeArrowTitle(alreadyHydrated, 'video-b', 'Community B', alreadyHydrated);
     assert.equal(alreadyHydrated.dataset.ytbDeOriginalTitle, 'Native B already present');
+});
+
+test('watch-page DeArrow repairs a stale SPA title through the Chromium player bridge', () => {
+    const title = new FakeDecoratedText('Native A');
+    const flexyData = { videoId: 'video-a' };
+    const api = loadContentHarness(
+        new Set(), { watchTitle: title, flexyData }
+    );
+    api.setElement('movie_player', {});
+
+    api.configure({ settings: { enabled: true, deArrowTitles: true } });
+    api.setPath('/watch?v=video-a');
+    api.setDeArrowCache('video-a', { title: 'Community A' });
+    api.processDeArrowWatchPage();
+    assert.equal(title.textContent, 'Community A');
+
+    const playerRequests = () => api.postedMessages.filter(
+        item => item.message.type === 'ytb-get-video-data'
+    );
+    assert.equal(playerRequests().length, 1);
+    assert.equal(playerRequests()[0].message.vid, 'video-a');
+    api.processDeArrowWatchPage();
+    assert.equal(playerRequests().length, 1,
+        'a pending MAIN-world read must not be posted twice');
+
+    api.setPath('/watch?v=video-b');
+    api.setDeArrowCache('video-b', {});
+    api.processDeArrowWatchPage();
+    assert.equal(title.textContent, 'Community A',
+        'flexy A must block route B from mutating A ownership');
+    assert.equal(playerRequests().length, 1);
+
+    flexyData.videoId = 'video-b';
+    api.refreshDeArrowWatchTitle();
+    assert.equal(title.textContent, 'Community A');
+    assert.equal(playerRequests().length, 2);
+    const firstBRequest = playerRequests()[1].message;
+
+    api.completeWatchPlayerData(
+        firstBRequest.token, 'video-b', 'video-a', 'Native A'
+    );
+    assert.equal(title.textContent, 'Community A');
+    assert.equal(playerRequests().length, 2,
+        'a mismatched reply must not start a request/response loop');
+
+    api.runLatestTimeout();
+    assert.equal(playerRequests().length, 3);
+    const currentBRequest = playerRequests()[2].message;
+    assert.notEqual(currentBRequest.token, firstBRequest.token);
+
+    api.completeWatchPlayerData(
+        firstBRequest.token, 'video-b', 'video-b', 'Ignored Native B'
+    );
+    assert.equal(title.textContent, 'Community A',
+        'a superseded bridge reply must be ignored');
+
+    api.completeWatchPlayerData(
+        currentBRequest.token, 'video-b', 'video-b', 'Native B'
+    );
+    assert.equal(title.textContent, 'Native B',
+        'verified player data must release stale A without a B replacement');
+    assert.equal(title.dataset.ytbDeTitle, undefined);
+    assert.equal(title.dataset.ytbDeAppliedTitle, undefined);
+    assert.equal(title.dataset.ytbDeAwaitTitle, undefined);
+    assert.equal(title.dataset.ytbDeStaleTitle, undefined);
+
+    api.setDeArrowCache('video-b', { title: 'Community B' });
+    api.refreshDeArrowWatchTitle();
+
+    assert.equal(title.textContent, 'Community B');
+    assert.equal(title.dataset.ytbDeOriginalTitle, 'Native B');
+    assert.equal(title.dataset.ytbDeOriginalTitleVideo, 'video-b');
+    assert.equal(title.dataset.ytbDeAwaitTitle, undefined);
+    assert.equal(playerRequests().length, 3,
+        'cached matching player data must suppress another bridge read');
+
+    const stalledTitle = new FakeDecoratedText('Stale A');
+    const stalledFlexy = { videoId: 'video-b' };
+    const stalled = loadContentHarness(
+        new Set(), { watchTitle: stalledTitle, flexyData: stalledFlexy }
+    );
+    stalled.setElement('movie_player', {});
+    stalled.configure({ settings: { enabled: true, deArrowTitles: true } });
+    stalled.setPath('/watch?v=video-b');
+    stalled.setDeArrowCache('video-b', {});
+    stalled.processDeArrowWatchPage();
+    const stalledRequests = () => stalled.postedMessages.filter(
+        item => item.message.type === 'ytb-get-video-data'
+    );
+    assert.equal(stalledRequests().length, 1);
+
+    for (let attempt = 0; attempt < 12; attempt++) {
+        const request = stalledRequests()[stalledRequests().length - 1].message;
+        stalled.completeWatchPlayerData(
+            request.token, 'video-b', 'video-a', 'Stale A'
+        );
+        stalled.runLatestTimeout();
+    }
+    const exhaustedRequestCount = stalledRequests().length;
+    stalled.processDeArrowWatchPage();
+    assert.equal(stalledRequests().length, exhaustedRequestCount,
+        'the bounded retry budget must enter cooldown after exhaustion');
+});
+
+test('watch-page DeArrow preserves early native hydration during navigation', () => {
+    const title = new FakeDecoratedText('Native A');
+    const flexyData = { videoId: 'video-a' };
+    const api = loadContentHarness(
+        new Set(), { watchTitle: title, flexyData }
+    );
+    api.setElement('movie_player', {});
+
+    api.configure({ settings: { enabled: true, deArrowTitles: true } });
+    api.setPath('/watch?v=video-a');
+    api.setDeArrowCache('video-a', { title: 'Community A' });
+    api.processDeArrowWatchPage();
+    assert.equal(title.textContent, 'Community A');
+
+    api.beginDeArrowWatchNavigation();
+    title.textContent = 'Native B';
+    api.processDeArrowWatchPage();
+    assert.equal(title.textContent, 'Native B',
+        'a route-A maintenance pass must not rewrite A over early B hydration');
+
+    api.setPath('/watch?v=video-b');
+    flexyData.videoId = 'video-b';
+    api.setDeArrowCache('video-b', { title: 'Community B' });
+    api.finishDeArrowWatchNavigation();
+    api.refreshDeArrowWatchTitle();
+
+    assert.equal(title.textContent, 'Community B');
+    assert.equal(title.dataset.ytbDeOriginalTitle, 'Native B');
+    assert.equal(title.dataset.ytbDeOriginalTitleVideo, 'video-b');
+    assert.ok(api.postedMessages.some(item =>
+        item.message.type === 'ytb-get-video-data' && item.message.vid === 'video-b'
+    ));
 });

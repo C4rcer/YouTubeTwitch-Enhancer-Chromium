@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.8.1 — 2026-07-15
+
+### Fixed
+
+- Reconcile DeArrow watch-page titles against the route, watch container, and MAIN-world player identity during YouTube SPA navigation so Chromium cannot retain or reapply the previous video's title.
+- Recover the new video's native title from verified player data when YouTube reuses the old heading, including videos without a DeArrow replacement.
+- Defer watch-title writes while YouTube's route, watch container, and player identities disagree, then reprocess on page-data and lookup completion.
+
+### Validation
+
+- Add two watch-page SPA regressions; the dependency-free suite now contains 37 tests.
+
 ## 4.8.0 — 2026-07-14
 
 ### Fixed

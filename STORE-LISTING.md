@@ -1,12 +1,12 @@
-# Chrome Web Store release sheet — 4.8.0
+# Chrome Web Store release sheet — 4.8.1
 
-This file contains the copy and dashboard answers for the Chromium 4.8.0
+This file contains the copy and dashboard answers for the Chromium 4.8.1
 upload. Upload the ZIP produced by `build.ps1`; do not upload this file or the
 `store-assets` directory as part of the extension package.
 
 ## Package
 
-- File: `youtube-twitch-enhancer-chromium-4.8.0.zip`
+- File: `youtube-twitch-enhancer-chromium-4.8.1.zip`
 - Manifest: V3
 - Minimum Chrome version: 111
 - Category: Productivity
@@ -52,21 +52,14 @@ This independent extension is not affiliated with or endorsed by YouTube,
 Google, Twitch, Amazon, SponsorBlock, DeArrow, Return YouTube Dislike,
 BetterTTV, FrankerFaceZ, or 7TV.
 
-## What's new in 4.8.0
+## What's new in 4.8.1
 
-- Added durable local watched history with Mark as watched, per-channel counts,
-  import/export/clear controls, and deterministic cross-tab Undo.
-- Reworked large-channel filtering to classify changed cards synchronously,
-  handle continuation batches and recycled renderers, and avoid repeated
-  whole-page scans.
-- Added a layout-preserving startup gate and 10-second recovery pass to reduce
-  visible filter flashing.
-- Hardened watched-history sharding, retries, migrations, distributed clear,
-  failed writes, and stale-tab convergence.
-- Fixed DeArrow restoration and recycled-card identity handling.
-- Fixed SponsorBlock badge invalidation and bounded request concurrency.
-- Fixed Twitch uptime after rapid single-page channel navigation.
-- Added 35 dependency-free regression tests.
+- Fixed DeArrow watch-page titles retaining or reapplying the previous video's
+  title after YouTube single-page navigation.
+- Cross-checks now reconcile the route, watch container, and player identity,
+  and recover the verified native title when YouTube reuses an old heading.
+- Added two watch-page navigation regressions, bringing the dependency-free
+  suite to 37 tests.
 
 ## Single purpose
 
@@ -183,13 +176,14 @@ Other required/available graphics:
 1. Push the updated public `PRIVACY.md` before submitting so its URL resolves.
 2. Enable 2-Step Verification on the owning Google account.
 3. Open the existing item and choose **Upload new package**.
-4. Upload only `youtube-twitch-enhancer-chromium-4.8.0.zip`.
+4. Upload only `youtube-twitch-enhancer-chromium-4.8.1.zip`.
 5. Paste the updated description, What's new text, single purpose, permission
    justifications, remote-code answer, and data-use disclosures above.
 6. Upload no more than five screenshots.
 7. Verify the support contact, category, language, regions, and privacy URL.
-8. Expect Chrome to request approval for the two newly declared community API
-   hosts on update; verify the warning shown for the package before publishing.
+8. If the published version predates the community API host permissions,
+   expect Chrome to request approval for them on update; verify the warning
+   shown for the package before publishing.
 9. Submit for review; use deferred publishing if you want approval before the
    release becomes public.
 

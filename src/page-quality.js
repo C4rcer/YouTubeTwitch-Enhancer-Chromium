@@ -12,6 +12,9 @@
  *   ytb-set-rate     { rate }  set the playback rate through the
  *                              player API so its UI stays in sync
  *                              (content.js sets the element rate too).
+ *   ytb-get-video-data
+ *              { token, vid }  read the active player's video ID and title;
+ *                              answered with "ytb-video-data".
  *   ytb-lact                   refresh YouTube's idle timer global so
  *                              the "Continue watching?" prompt stays
  *                              away ("never pause me").
@@ -38,6 +41,31 @@
             try {
                 if (player && typeof player.setPlaybackRate === 'function') player.setPlaybackRate(rate);
             } catch (err) { /* content.js sets the element rate regardless */ }
+            return;
+        }
+
+        if (e.data.type === 'ytb-get-video-data') {
+            const token = e.data.token;
+            const requestedVid = e.data.vid;
+            if (typeof token !== 'string' || !token ||
+                typeof requestedVid !== 'string' || !requestedVid) return;
+            const player = document.getElementById('movie_player');
+            let videoId = '', title = '';
+            try {
+                const data = player && typeof player.getVideoData === 'function'
+                    ? player.getVideoData() : null;
+                if (data) {
+                    videoId = String(data.video_id || data.videoId || '');
+                    title = String(data.title || '');
+                }
+            } catch (err) { /* reply empty so content.js can retry later */ }
+            window.postMessage({
+                type: 'ytb-video-data',
+                token,
+                requestedVid,
+                videoId,
+                title
+            }, location.origin);
             return;
         }
 

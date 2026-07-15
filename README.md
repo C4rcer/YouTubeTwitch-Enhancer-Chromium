@@ -196,9 +196,10 @@ node --test --test-isolation=none tests/content-filter.test.js tests/watched-db.
 ```
 
 It covers 600-card channels, incremental continuation batches, hydration and
-renderer recycling, filter precedence, DeArrow/SponsorBlock identity and queue
-behaviour, watched-history sharding/retry, simultaneous tabs, distributed
-clears, migration and deterministic Undo convergence.
+renderer recycling, filter precedence, DeArrow/SponsorBlock identity,
+watch-page SPA navigation and queue behaviour, watched-history sharding/retry,
+simultaneous tabs, distributed clears, migration and deterministic Undo
+convergence.
 
 ## Usage
 
@@ -265,9 +266,9 @@ data, network requests, identifiers and retention controls.
   from the page, so the content scripts can't reach YouTube's player API or
   Twitch's React fibers directly (on Firefox they can, via
   `wrappedJSObject`); instead they relay `postMessage` requests that these
-  helpers answer: max quality and playback rate on YouTube; the Slate chat
-  editor, channel id, stream start time, and the anonymous-chat WebSocket
-  shim on Twitch.
+  helpers answer: max quality, playback rate and watch-page player identity on
+  YouTube; the Slate chat editor, channel id, stream start time, and the
+  anonymous-chat WebSocket shim on Twitch.
 - **`src/background.js`** registers the right-click menus, opens the
   onboarding page on first install, relays the SponsorBlock / DeArrow / RYD
   and emote-API lookups (so page CSP and CORS never interfere), and mirrors

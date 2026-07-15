@@ -2260,8 +2260,21 @@
     const deInFlight = new Set();
     const DE_CACHE_MAX = 800;
     const DE_CONCURRENCY = 6;
+    const DE_WATCH_PLAYER_REQUEST_TIMEOUT_MS = 1000;
+    const DE_WATCH_PLAYER_RETRY_DELAY_MS = 200;
+    const DE_WATCH_PLAYER_RETRY_LIMIT = 12;
+    const DE_WATCH_PLAYER_RETRY_COOLDOWN_MS = 10000;
     let deArrowAppliedTitles = !!document.querySelector('[data-ytb-de-title]');
     let deArrowAppliedThumbs = !!document.querySelector('img[data-ytb-de-thumb]');
+    let deArrowWatchNavigating = false;
+    let deArrowWatchNavigationTimer = null;
+    let deArrowWatchPlayerData = null;
+    let deArrowWatchPlayerRequestSeq = 0;
+    let deArrowWatchPlayerPending = null;
+    let deArrowWatchPlayerRetryTimer = null;
+    let deArrowWatchPlayerRetryVid = null;
+    let deArrowWatchPlayerRetryCount = 0;
+    let deArrowWatchPlayerRetryCooldownUntil = 0;
 
     function deLookup(vid, tile) {
         if (deInFlight.has(vid)) return;
@@ -2279,7 +2292,16 @@
             .catch(() => deCache.set(vid, {}))
             .finally(() => {
                 deInFlight.delete(vid);
-                if (!retired) queueTileEnhancements();
+                if (!retired) {
+                    // Watch-page lookups are not part of the card queue. Apply a
+                    // resolved title immediately instead of waiting for the
+                    // low-frequency recovery pass.
+                    if (settings.enabled && settings.deArrowTitles &&
+                        watchVideoId() === vid) {
+                        processDeArrowWatchPage();
+                    }
+                    queueTileEnhancements();
+                }
             });
     }
 
@@ -2645,22 +2667,193 @@
         }
     }
 
+    function resetDeArrowWatchPlayerRetry() {
+        if (deArrowWatchPlayerRetryTimer) {
+            clearTimeout(deArrowWatchPlayerRetryTimer);
+            deArrowWatchPlayerRetryTimer = null;
+        }
+        deArrowWatchPlayerRetryVid = null;
+        deArrowWatchPlayerRetryCount = 0;
+        deArrowWatchPlayerRetryCooldownUntil = 0;
+        deArrowWatchPlayerPending = null;
+    }
+
+    function scheduleDeArrowWatchPlayerRetry(vid, delay, pendingToken) {
+        if (deArrowWatchPlayerRetryTimer) {
+            clearTimeout(deArrowWatchPlayerRetryTimer);
+            deArrowWatchPlayerRetryTimer = null;
+        }
+        if (deArrowWatchPlayerRetryVid !== vid) {
+            deArrowWatchPlayerRetryVid = vid;
+            deArrowWatchPlayerRetryCount = 0;
+            deArrowWatchPlayerRetryCooldownUntil = 0;
+        }
+        if (deArrowWatchPlayerRetryCount >= DE_WATCH_PLAYER_RETRY_LIMIT) {
+            if (!deArrowWatchPlayerRetryCooldownUntil) {
+                deArrowWatchPlayerRetryCooldownUntil =
+                    Date.now() + DE_WATCH_PLAYER_RETRY_COOLDOWN_MS;
+            }
+            return;
+        }
+        deArrowWatchPlayerRetryTimer = setTimeout(() => {
+            deArrowWatchPlayerRetryTimer = null;
+            if (retired || !settings.enabled || !settings.deArrowTitles ||
+                watchVideoId() !== vid) return;
+            if (pendingToken) {
+                if (!deArrowWatchPlayerPending ||
+                    deArrowWatchPlayerPending.token !== pendingToken) return;
+                deArrowWatchPlayerPending = null;
+            }
+            deArrowWatchPlayerRetryCount++;
+            if (deArrowWatchPlayerRetryCount >= DE_WATCH_PLAYER_RETRY_LIMIT) {
+                deArrowWatchPlayerRetryCooldownUntil =
+                    Date.now() + DE_WATCH_PLAYER_RETRY_COOLDOWN_MS;
+            }
+            processDeArrowWatchPage();
+        }, delay);
+    }
+
+    function readWatchPlayerData(vid) {
+        const player = document.getElementById('movie_player');
+        if (!player) return deArrowWatchPlayerData;
+        try {
+            // Keep the direct path for browsers that expose the page-world API.
+            const playerApi = player.wrappedJSObject || player;
+            if (playerApi && typeof playerApi.getVideoData === 'function') {
+                const raw = playerApi.getVideoData();
+                const data = raw && (raw.wrappedJSObject || raw);
+                if (data) {
+                    const playerData = {
+                        videoId: cleanText(String(data.video_id || data.videoId || '')),
+                        title: cleanText(String(data.title || ''))
+                    };
+                    if (playerData.videoId === vid && playerData.title) {
+                        resetDeArrowWatchPlayerRetry();
+                    }
+                    return playerData;
+                }
+            }
+        } catch (e) { /* bridge fallback below */ }
+
+        if (!vid) return deArrowWatchPlayerData;
+        if (deArrowWatchPlayerRetryVid !== vid) {
+            resetDeArrowWatchPlayerRetry();
+            deArrowWatchPlayerRetryVid = vid;
+        }
+        const now = Date.now();
+        if (deArrowWatchPlayerRetryCount >= DE_WATCH_PLAYER_RETRY_LIMIT &&
+            deArrowWatchPlayerRetryCooldownUntil &&
+            now >= deArrowWatchPlayerRetryCooldownUntil) {
+            deArrowWatchPlayerRetryCount = 0;
+            deArrowWatchPlayerRetryCooldownUntil = 0;
+        }
+        const retryCoolingDown =
+            deArrowWatchPlayerRetryCount >= DE_WATCH_PLAYER_RETRY_LIMIT;
+        const cacheComplete = deArrowWatchPlayerData &&
+            deArrowWatchPlayerData.videoId === vid &&
+            !!deArrowWatchPlayerData.title;
+        const requestFresh = deArrowWatchPlayerPending &&
+            deArrowWatchPlayerPending.vid === vid &&
+            now - deArrowWatchPlayerPending.sentAt <
+                DE_WATCH_PLAYER_REQUEST_TIMEOUT_MS;
+        if (!cacheComplete && !requestFresh && !retryCoolingDown) {
+            const token = INSTANCE_ID + ':' + (++deArrowWatchPlayerRequestSeq);
+            deArrowWatchPlayerPending = { token, vid, sentAt: now };
+            try {
+                window.postMessage({ type: 'ytb-get-video-data', token, vid },
+                    location.origin);
+                scheduleDeArrowWatchPlayerRetry(
+                    vid, DE_WATCH_PLAYER_REQUEST_TIMEOUT_MS, token
+                );
+            } catch (e) {
+                deArrowWatchPlayerPending = null;
+            }
+        }
+        return deArrowWatchPlayerData;
+    }
+
+    function watchFlexyVideoId() {
+        const flexy = document.querySelector('ytd-watch-flexy[video-id]');
+        return cleanText(flexy && flexy.getAttribute &&
+            flexy.getAttribute('video-id') || '');
+    }
+
+    function beginDeArrowWatchNavigation() {
+        if (retired) return;
+        resetDeArrowWatchPlayerRetry();
+        deArrowWatchNavigating = true;
+        if (deArrowWatchNavigationTimer) clearTimeout(deArrowWatchNavigationTimer);
+        // A cancelled same-URL navigation may omit yt-navigate-finish. Fail open
+        // after a bounded delay; route/flexy/player identity checks still prevent
+        // an old title from being written onto a new video.
+        deArrowWatchNavigationTimer = setTimeout(() => {
+            deArrowWatchNavigationTimer = null;
+            if (retired) return;
+            deArrowWatchNavigating = false;
+            refreshDeArrowWatchTitle();
+        }, 3000);
+    }
+
+    function finishDeArrowWatchNavigation() {
+        deArrowWatchNavigating = false;
+        if (deArrowWatchNavigationTimer) {
+            clearTimeout(deArrowWatchNavigationTimer);
+            deArrowWatchNavigationTimer = null;
+        }
+    }
+
+    function refreshDeArrowWatchTitle() {
+        if (!retired && settings.enabled && settings.deArrowTitles) {
+            processDeArrowWatchPage();
+        }
+    }
+
     function processDeArrowWatchPage() {
-        if (!settings.deArrowTitles || location.pathname !== '/watch') return;
+        if (!settings.deArrowTitles || location.pathname !== '/watch' ||
+            deArrowWatchNavigating) return;
+
         const vid = watchVideoId();
         const h1 = document.querySelector(
             'ytd-watch-metadata h1 yt-formatted-string, h1.ytd-watch-metadata'
         );
-        if (vid && h1) {
-            prepareDeArrowTitleIdentity(deArrowTextTarget(h1), vid);
+        if (h1) observeFilterDetails(h1);
+
+        // During SPA navigation YouTube can update the heading, route, flexy and
+        // player in separate turns. Never write a title while those identities
+        // disagree, or a late pass for video A can overwrite video B's heading.
+        const flexyVideoId = watchFlexyVideoId();
+        if (vid && flexyVideoId && flexyVideoId !== vid) return;
+        const playerData = vid ? readWatchPlayerData(vid) : null;
+        const playerMatches = !!(playerData && playerData.videoId === vid);
+        // Player data can lag the watch metadata or temporarily identify an ad.
+        // A matching flexy is enough to trust an already-hydrated DOM title, but
+        // never use a mismatched player's title as the native fallback.
+        if (!flexyVideoId && playerData && playerData.videoId &&
+            !playerMatches) return;
+
+        let titleReady = true;
+        const target = h1 && deArrowTextTarget(h1);
+        if (vid && target) {
+            titleReady = prepareDeArrowTitleIdentity(target, vid);
+            if (!titleReady && playerMatches && playerData.title) {
+                // YouTube can reuse the watch heading without hydrating its text
+                // again after our replacement. Player data is authoritative once
+                // its video ID agrees with the URL, so use it to break the stale
+                // A-title/awaiting-B deadlock and preserve B's real original.
+                target.textContent = playerData.title;
+                target.removeAttribute('data-ytb-de-await-title');
+                target.removeAttribute('data-ytb-de-stale-title');
+                titleReady = true;
+            }
         }
+
         const entry = vid && deCache.get(vid);
         if (vid && entry === undefined) {
             if (deInFlight.size < DE_CONCURRENCY) deLookup(vid);
             return;
         }
         if (!entry || entry === 'pending' || !entry.title) return;
-        if (h1) applyDeArrowTitle(h1, vid, entry.title, h1);
+        if (h1 && titleReady) applyDeArrowTitle(h1, vid, entry.title, h1);
     }
 
     // Community integrations still need to decorate appended cards. Keep a
@@ -3381,15 +3574,45 @@
     }
 
     /* ==================================================================
-     * 5d. Force the player to the highest available quality, once per video.
+     * 5d. Chromium player bridge and highest available quality.
      *     Firefox exposes the page-world player API via wrappedJSObject.
      *     Chromium uses page-quality.js in the MAIN world and relays requests
      *     and completion messages through postMessage.
      * ================================================================== */
     function onPageQualityMessage(e) {
-        if (retired || e.source !== window || !e.data ||
-            e.data.type !== 'ytb-max-quality-done' || !e.data.vid) return;
-        lastQualityVideoId = e.data.vid;
+        if (retired || e.source !== window || !e.data) return;
+        if (e.data.type === 'ytb-max-quality-done' && e.data.vid) {
+            lastQualityVideoId = e.data.vid;
+            return;
+        }
+        if (e.data.type !== 'ytb-video-data') return;
+
+        const pending = deArrowWatchPlayerPending;
+        if (!pending || e.data.token !== pending.token ||
+            e.data.requestedVid !== pending.vid) return;
+        if (deArrowWatchPlayerRetryTimer) {
+            clearTimeout(deArrowWatchPlayerRetryTimer);
+            deArrowWatchPlayerRetryTimer = null;
+        }
+        deArrowWatchPlayerPending = null;
+
+        const videoId = cleanText(typeof e.data.videoId === 'string'
+            ? e.data.videoId : '');
+        const title = cleanText(typeof e.data.title === 'string'
+            ? e.data.title : '');
+        if (videoId) deArrowWatchPlayerData = { videoId, title };
+
+        if (videoId === watchVideoId() && title) {
+            resetDeArrowWatchPlayerRetry();
+            refreshDeArrowWatchTitle();
+        } else {
+            // The bridge can answer while the player still identifies the old
+            // video or an ad. Retry briefly without creating a synchronous
+            // message loop; navigation and the recovery pass remain fallbacks.
+            scheduleDeArrowWatchPlayerRetry(
+                pending.vid, DE_WATCH_PLAYER_RETRY_DELAY_MS, null
+            );
+        }
     }
     window.addEventListener('message', onPageQualityMessage);
 
@@ -4304,6 +4527,11 @@
             clearTimeout(tileEnhancementTimer);
             tileEnhancementTimer = null;
         }
+        if (deArrowWatchNavigationTimer) {
+            clearTimeout(deArrowWatchNavigationTimer);
+            deArrowWatchNavigationTimer = null;
+        }
+        resetDeArrowWatchPlayerRetry();
         pendingTileEnhancements.clear();
         document.querySelectorAll('.ytb-menu-item').forEach(el => {
             if (el.dataset.ytbInstance === INSTANCE_ID) el.remove();
@@ -4406,12 +4634,21 @@
 
         // Blackout lifecycle: drop it optimistically when navigation starts so a
         // good video isn't held paused, then re-evaluate when the page settles.
-        document.addEventListener('yt-navigate-start', clearBlackout, true);
-        document.addEventListener('yt-navigate-finish', runAll, true);
+        document.addEventListener('yt-navigate-start', () => {
+            beginDeArrowWatchNavigation();
+            clearBlackout();
+        }, true);
+        document.addEventListener('yt-navigate-finish', () => {
+            finishDeArrowWatchNavigation();
+            runAll();
+        }, true);
+        document.addEventListener('yt-page-data-updated',
+            refreshDeArrowWatchTitle, true);
         let lastHref = location.href;
         lifecycleIntervals.push(setInterval(() => {
             if (retired || location.href === lastHref) return;
             lastHref = location.href;
+            finishDeArrowWatchNavigation();
             redirectShortsUrl();
             if (!retired) runAll();
         }, 500));
