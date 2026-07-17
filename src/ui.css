@@ -1,13 +1,59 @@
 :root {
+    color-scheme: dark;
     --bg: #0f0f0f;
     --panel: #181818;
     --panel-2: #212121;
     --border: #303030;
     --text: #f1f1f1;
-    --muted: #aaaaaa;
+    --muted: #b6b6b6;
     --accent: #ff4d4d;
-    --accent-2: #3ea6ff;
-    --ok: #2ba640;
+    --accent-2: #62b6ff;
+    --ok: #45c25a;
+    --hover: #2c2c2c;
+}
+
+:root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0f0f0f;
+    --panel: #181818;
+    --panel-2: #212121;
+    --border: #303030;
+    --text: #f1f1f1;
+    --muted: #b6b6b6;
+    --accent: #ff4d4d;
+    --accent-2: #62b6ff;
+    --ok: #45c25a;
+    --hover: #2c2c2c;
+}
+
+:root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --panel-2: #f0f1f3;
+    --border: #c9ccd1;
+    --text: #17181a;
+    --muted: #5c6168;
+    --accent: #c92525;
+    --accent-2: #075ca8;
+    --ok: #19752a;
+    --hover: #e4e6e9;
+}
+
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme]), :root[data-theme="system"] {
+        color-scheme: light;
+        --bg: #f7f7f8;
+        --panel: #ffffff;
+        --panel-2: #f0f1f3;
+        --border: #c9ccd1;
+        --text: #17181a;
+        --muted: #5c6168;
+        --accent: #c92525;
+        --accent-2: #075ca8;
+        --ok: #19752a;
+        --hover: #e4e6e9;
+    }
 }
 
 * { box-sizing: border-box; }
@@ -33,12 +79,12 @@ a:hover { text-decoration: underline; }
 }
 .header img { width: 26px; height: 26px; }
 .header h1 { font-size: 15px; }
-.header .sub { color: var(--muted); font-size: 11px; }
+.header .sub { color: var(--muted); font-size: 12px; }
 
 .section { padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .section:last-child { border-bottom: none; }
 .section h2 {
-    font-size: 11px;
+    font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--muted);
@@ -73,9 +119,9 @@ button {
     cursor: pointer;
     white-space: nowrap;
 }
-button:hover { background: #2c2c2c; }
+button:hover { background: var(--hover); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button.primary:hover { background: #ff6363; }
+button.primary:hover { background: color-mix(in srgb, var(--accent) 82%, white); }
 button.icon { padding: 6px 9px; line-height: 1; }
 button.danger { color: var(--accent); }
 
@@ -88,7 +134,7 @@ label.toggle {
 }
 label.toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
 label.toggle .t-text { display: flex; flex-direction: column; }
-label.toggle .t-text small { color: var(--muted); font-size: 11px; }
+label.toggle .t-text small { color: var(--muted); font-size: 12px; }
 
 .list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow: auto; }
 .list-item {
@@ -101,7 +147,7 @@ label.toggle .t-text small { color: var(--muted); font-size: 11px; }
     padding: 7px 10px;
 }
 .list-item .label { font-weight: 500; }
-.list-item .meta { color: var(--muted); font-size: 11px; }
+.list-item .meta { color: var(--muted); font-size: 12px; }
 .list-item .grow { overflow: hidden; }
 .list-item .label, .list-item .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -173,9 +219,40 @@ label.toggle .t-text small { color: var(--muted); font-size: 11px; }
     background: transparent;
     border-radius: 999px;
     padding: 4px 10px;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
 }
-.site-tab:hover { background: #2c2c2c; }
+.site-tab:hover { background: var(--hover); }
 .site-tab.active { background: var(--accent); color: #fff; }
 #tab-twitch.active { background: var(--twitch, #9147ff); }
+
+:focus-visible {
+    outline: 3px solid var(--accent-2);
+    outline-offset: 2px;
+}
+
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+    border-color: var(--accent-2);
+    outline: 3px solid var(--accent-2);
+    outline-offset: 1px;
+}
+
+@media (forced-colors: active) {
+    * { forced-color-adjust: auto; }
+    button, input, select, textarea, .list-item, .site-tabs, .pill {
+        border-color: ButtonText;
+    }
+    :focus-visible { outline-color: Highlight; }
+    button.primary, .site-tab.active { background: Highlight; color: HighlightText; }
+}
+.network-badge {
+    display: inline-block;
+    margin-left: 4px;
+    padding: 1px 6px;
+    border: 1px solid var(--accent-2);
+    border-radius: 999px;
+    color: var(--accent-2);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.25;
+}

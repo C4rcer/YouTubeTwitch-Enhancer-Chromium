@@ -60,8 +60,28 @@
         const twitch = site === 'twitch';
         els.panelTwitch.classList.toggle('hidden', !twitch);
         els.panelYoutube.classList.toggle('hidden', twitch);
+        els.panelTwitch.setAttribute('aria-hidden', String(!twitch));
+        els.panelYoutube.setAttribute('aria-hidden', String(twitch));
         els.tabTwitch.classList.toggle('active', twitch);
         els.tabYoutube.classList.toggle('active', !twitch);
+        els.tabTwitch.setAttribute('aria-selected', String(twitch));
+        els.tabYoutube.setAttribute('aria-selected', String(!twitch));
+        els.tabTwitch.tabIndex = twitch ? 0 : -1;
+        els.tabYoutube.tabIndex = twitch ? -1 : 0;
+    }
+
+    function handleTabKeydown(event) {
+        const tabs = [els.tabYoutube, els.tabTwitch];
+        const current = tabs.indexOf(event.currentTarget);
+        let next = current;
+        if (event.key === 'ArrowLeft') next = (current - 1 + tabs.length) % tabs.length;
+        else if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = tabs.length - 1;
+        else return;
+        event.preventDefault();
+        showPanel(next === 1 ? 'twitch' : 'youtube');
+        tabs[next].focus();
     }
 
     // Pick the panel matching the site in the active tab. Tab URLs are only
@@ -77,6 +97,8 @@
     }
 
     function render() {
+        document.documentElement.dataset.theme = ['light', 'dark'].includes(data.settings.settingsTheme)
+            ? data.settings.settingsTheme : 'system';
         // YouTube
         els.channels.textContent = data.blockedChannels.length;
         els.videos.textContent = data.hiddenVideoIds.length;
@@ -233,6 +255,8 @@
     function wire() {
         els.tabYoutube.addEventListener('click', () => showPanel('youtube'));
         els.tabTwitch.addEventListener('click', () => showPanel('twitch'));
+        els.tabYoutube.addEventListener('keydown', handleTabKeydown);
+        els.tabTwitch.addEventListener('keydown', handleTabKeydown);
         // YouTube
         els.addBtn.addEventListener('click', addChannel);
         els.addInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addChannel(); });

@@ -2,7 +2,7 @@
  * Shared helpers for the popup and options pages.
  * Loaded as a plain script, so it exposes globals on window.
  * ================================================================== */
-/* global browser, chrome */
+/* global browser, chrome, YTBFeatures */
 const YTB = (function () {
     'use strict';
 
@@ -47,6 +47,8 @@ const YTB = (function () {
         ytNoPauseDialog: true,       // auto-dismiss "Video paused. Continue watching?"
         ytDisableAutoplay: false,    // keep YouTube's up-next autoplay toggle off
         ytAutoExpandDesc: false,     // auto-expand the watch-page description
+        ytTranscriptWorkspace: true, // local transcript/chapter dock on watch pages
+        ytCollectionsEnabled: true,  // local collection filter on Subscriptions
         // ---- Community data (opt-in; all off by default) ----
         sbEnabled: false,            // SponsorBlock segment skipping (sponsor.ajay.app)
         sbSkipSponsor: true,         //   which categories to skip while enabled
@@ -92,8 +94,24 @@ const YTB = (function () {
         twSpeedHotkeys: true,        // [ ] \ speed hotkeys on VODs and clips
         twUptime: true,              // ⏱ stream uptime chip near the viewer count
         twHoverPreviews: true,       // live thumbnail preview when hovering sidebar channels
+        twPlayerRecovery: true,      // bounded media-error recovery and status
+        twSeekStep: 10,              // configurable VOD/clip seek step in seconds
+        twSidebarTools: true,        // local sidebar search, favourites and groups
+        twChatOverlayButton: true,   // theater/fullscreen overlay-chat control
+        twChatOverlayOpacity: 0.82,
+        twChatOverlayWidth: 380,
+        twChatOverlayFontScale: 1,
+        twChatOverlayPlacement: 'right',
+        twChatOverlayAutoHide: false,
+        twChatOverlayClickThrough: false,
+        twChatOverlayInteraction: false,
         // ---- YouTube extras ----
-        ytCinemaButton: true         // cinema-mode (darken page) button on the player
+        ytCinemaButton: true,        // cinema-mode (darken page) button on the player
+        // ---- Shared settings UI ----
+        settingsTheme: 'system',
+        settingsMode: 'basic',
+        diagnosticsEnabled: true,
+        recentActionsEnabled: true
     };
 
     function cleanKeywords(arr) {
@@ -109,6 +127,12 @@ const YTB = (function () {
         v = parseInt(v, 10);
         if (isNaN(v)) return def;
         return Math.min(max, Math.max(min, v));
+    }
+
+    function clampFloat(v, min, max, def) {
+        v = parseFloat(v);
+        if (isNaN(v)) return def;
+        return Math.min(max, Math.max(min, Math.round(v * 100) / 100));
     }
 
     function clampSpeed(v) {
@@ -143,7 +167,30 @@ const YTB = (function () {
         settings.twSmoothScrollMs = clampInt(settings.twSmoothScrollMs, 0, 1000, 0);
         settings.twVolumeBoost = clampBoost(settings.twVolumeBoost);
         settings.ytSpeedDefault = clampSpeed(settings.ytSpeedDefault);
+        settings.twSeekStep = clampInt(settings.twSeekStep, 1, 60, 10);
+        settings.twChatOverlayOpacity = clampFloat(settings.twChatOverlayOpacity, 0.2, 1, 0.82);
+        settings.twChatOverlayWidth = clampInt(settings.twChatOverlayWidth, 260, 700, 380);
+        settings.twChatOverlayFontScale = clampFloat(settings.twChatOverlayFontScale, 0.75, 1.75, 1);
+        if (!['left', 'right'].includes(settings.twChatOverlayPlacement)) settings.twChatOverlayPlacement = 'right';
+        if (!['system', 'light', 'dark'].includes(settings.settingsTheme)) settings.settingsTheme = 'system';
+        if (!['basic', 'advanced'].includes(settings.settingsMode)) settings.settingsMode = 'basic';
+        const featureData = (typeof YTBFeatures !== 'undefined')
+            ? YTBFeatures.normalizeFeatureData(d) : {
+                inputBindings: d.inputBindings || {},
+                playbackProfiles: d.playbackProfiles || [],
+                activePlaybackProfiles: d.activePlaybackProfiles || {},
+                channelPlaybackProfiles: d.channelPlaybackProfiles || {},
+                ytCollections: d.ytCollections || [],
+                twitchSidebar: d.twitchSidebar || { favorites: [], groups: [] },
+                twitchPlayer: d.twitchPlayer || {},
+                twitchChatOverlay: d.twitchChatOverlay || {},
+                twitchDiagnostics: d.twitchDiagnostics || {},
+                settingsPresets: d.settingsPresets || [],
+                recentActions: d.recentActions || [],
+                hiddenVideoMetadata: d.hiddenVideoMetadata || {}
+            };
         return {
+            ...featureData,
             hiddenVideoIds: Array.isArray(d.hiddenVideoIds) ? [...new Set(d.hiddenVideoIds)] : [],
             blockedChannels: Array.isArray(d.blockedChannels)
                 ? d.blockedChannels
@@ -408,6 +455,92 @@ const YTB = (function () {
             }
             out[field] = [...set];
         }
+        // Shared feature data is imported only when that category is present.
+        // Merge mode keeps local profile/rule choices on collisions and unions
+        // collection/sidebar identities.
+        if (incoming && incoming.inputBindings && typeof incoming.inputBindings === 'object') {
+            out.inputBindings = inc.inputBindings;
+        }
+        if (incoming && Array.isArray(incoming.playbackProfiles)) {
+            const profiles = new Map(out.playbackProfiles.map(profile => [profile.id, profile]));
+            for (const profile of inc.playbackProfiles) {
+                if (!profiles.has(profile.id)) profiles.set(profile.id, profile);
+            }
+            out.playbackProfiles = [...profiles.values()];
+        }
+        if (incoming && incoming.activePlaybackProfiles &&
+                typeof incoming.activePlaybackProfiles === 'object') {
+            out.activePlaybackProfiles = Object.assign(
+                {}, inc.activePlaybackProfiles, out.activePlaybackProfiles);
+        }
+        if (incoming && incoming.channelPlaybackProfiles &&
+                typeof incoming.channelPlaybackProfiles === 'object') {
+            out.channelPlaybackProfiles = {
+                youtube: Object.assign(
+                    {}, inc.channelPlaybackProfiles.youtube, out.channelPlaybackProfiles.youtube),
+                twitch: Object.assign(
+                    {}, inc.channelPlaybackProfiles.twitch, out.channelPlaybackProfiles.twitch)
+            };
+        }
+        if (incoming && Array.isArray(incoming.ytCollections)) {
+            for (const collection of inc.ytCollections) {
+                const local = out.ytCollections.find(item => item.id === collection.id);
+                if (!local) {
+                    out.ytCollections.push(collection);
+                    continue;
+                }
+                const keys = new Set(local.channels.map(channel => channel.key.toLowerCase()));
+                for (const channel of collection.channels) {
+                    if (!keys.has(channel.key.toLowerCase())) {
+                        keys.add(channel.key.toLowerCase());
+                        local.channels.push(channel);
+                    }
+                }
+            }
+        }
+        if (incoming && incoming.twitchSidebar && typeof incoming.twitchSidebar === 'object') {
+            const favourites = new Map(
+                out.twitchSidebar.favorites.map(channel => [channel.login, channel]));
+            for (const channel of inc.twitchSidebar.favorites) {
+                if (!favourites.has(channel.login)) favourites.set(channel.login, channel);
+            }
+            out.twitchSidebar.favorites = [...favourites.values()];
+            for (const group of inc.twitchSidebar.groups) {
+                const local = out.twitchSidebar.groups.find(item => item.id === group.id);
+                if (!local) {
+                    out.twitchSidebar.groups.push(group);
+                    continue;
+                }
+                const channels = new Map(
+                    local.channels.map(channel => [channel.login, channel]));
+                for (const channel of group.channels) {
+                    if (!channels.has(channel.login)) channels.set(channel.login, channel);
+                }
+                local.channels = [...channels.values()];
+            }
+        }
+        if (incoming && Array.isArray(incoming.settingsPresets)) {
+            const presets = new Map(out.settingsPresets.map(preset => [preset.id, preset]));
+            for (const preset of inc.settingsPresets) {
+                if (!presets.has(preset.id)) presets.set(preset.id, preset);
+            }
+            out.settingsPresets = [...presets.values()];
+        }
+        if (incoming && incoming.hiddenVideoMetadata &&
+                typeof incoming.hiddenVideoMetadata === 'object') {
+            out.hiddenVideoMetadata = Object.assign(
+                {}, inc.hiddenVideoMetadata, out.hiddenVideoMetadata);
+        }
+        if (incoming && incoming.twitchPlayer && typeof incoming.twitchPlayer === 'object') {
+            out.twitchPlayer = inc.twitchPlayer;
+        }
+        if (incoming && incoming.twitchChatOverlay &&
+                typeof incoming.twitchChatOverlay === 'object') {
+            out.twitchChatOverlay = inc.twitchChatOverlay;
+        }
+        if (typeof YTBFeatures !== 'undefined') {
+            Object.assign(out, YTBFeatures.normalizeFeatureData(out));
+        }
         // Per-channel speeds: incoming entries win only where local has none.
         out.ytChannelSpeeds = Object.assign({}, inc.ytChannelSpeeds, out.ytChannelSpeeds);
         // Only take settings the file actually carries — never let a
@@ -421,7 +554,7 @@ const YTB = (function () {
     }
 
     function isValidPayload(obj) {
-        return obj && typeof obj === 'object' &&
+        return !!(obj && typeof obj === 'object' &&
             (Array.isArray(obj.blockedChannels) || Array.isArray(obj.hiddenVideoIds) ||
              Array.isArray(obj.blockedKeywords) || Array.isArray(obj.sbWhitelist) ||
              Array.isArray(obj.twitchBlockedChannels) ||
@@ -429,7 +562,11 @@ const YTB = (function () {
              Array.isArray(obj.twitchBlockedTags) || Array.isArray(obj.twitchHighlightKeywords) ||
              Array.isArray(obj.twitchChatBlockKeywords) || Array.isArray(obj.twitchChatBlockUsers) ||
              Array.isArray(obj.ytCommentKeywords) ||
-             obj.settings);
+             obj.inputBindings || Array.isArray(obj.playbackProfiles) ||
+             Array.isArray(obj.ytCollections) || obj.twitchSidebar ||
+             Array.isArray(obj.settingsPresets) || obj.hiddenVideoMetadata ||
+             obj.twitchPlayer || obj.twitchChatOverlay ||
+             obj.settings));
     }
 
     function onChanged(cb) {
@@ -458,7 +595,7 @@ const YTB = (function () {
 
     return {
         DEFAULT_SETTINGS,
-        normalize, clampThreshold, clampBoost, clampInt, clampSpeed, cleanKeywords,
+        normalize, clampThreshold, clampBoost, clampInt, clampFloat, clampSpeed, cleanKeywords,
         load, save, onChanged,
         parseChannelInput, sameChannel, addChannel, addWhitelistChannel,
         channelLabel, channelUrl,
@@ -469,3 +606,4 @@ const YTB = (function () {
         exportFilename, downloadJson
     };
 })();
+if (typeof globalThis !== 'undefined') globalThis.YTB = YTB;

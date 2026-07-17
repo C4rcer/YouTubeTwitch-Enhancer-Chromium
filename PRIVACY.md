@@ -1,6 +1,6 @@
 # Privacy Policy: YouTube/Twitch Enhancer
 
-**Last updated: 14 July 2026**
+**Last updated: 16 July 2026**
 
 YouTube/Twitch Enhancer contains no analytics, advertising, or tracking and has
 no developer-operated backend. The extension does not send page data, viewing
@@ -27,7 +27,18 @@ The extension stores the following in `chrome.storage.local`:
   each channel;
 - feature state including cross-tab watched-history Undo records, browser-sync
   status, a Twitch clip-intent timestamp, and the most recently created Twitch
-  clip URL and timestamp; and
+  clip URL and timestamp;
+- user-created configuration for the shared playback layer: keyboard/mouse/wheel
+  input bindings, named playback profiles and their channel assignments, local
+  YouTube subscription collections (channel identifiers the user grouped),
+  local Twitch sidebar favourites and groups (channel logins the user pinned or
+  grouped), chat-overlay and player-recovery preferences, named settings
+  presets, a bounded automatic pre-reset backup, a bounded list of recent
+  reversible actions, and bounded title/channel/thumbnail metadata for videos
+  the user hides (so hidden entries stay recognizable in the manager);
+- a bounded, redacted player-recovery diagnostics record that never contains
+  URLs, channel or video identities, titles, transcript or chat text, or
+  tokens; and
 - a SponsorBlock user ID used only for user-initiated submissions and votes. It
   is generated randomly on first use unless the user supplies an existing
   SponsorBlock ID, and it can be viewed, replaced, or cleared in Advanced
@@ -59,8 +70,11 @@ sent to the developer.
 
 If the user enables **Sync block lists via browser sync**, the extension
 mirrors its YouTube/Twitch blocked channel and category lists, manually hidden
-video IDs, and keyword/comment/chat filter lists through the browser vendor's
-`chrome.storage.sync` service. Settings, per-channel playback speeds,
+video IDs, keyword/comment/chat filter lists, and a quota-capped copy of the
+user's local YouTube subscription collections and Twitch sidebar
+favourites/groups through the browser vendor's `chrome.storage.sync` service.
+Settings, per-channel playback speeds, playback profiles, input bindings,
+settings presets, diagnostics, recent actions, hidden-video metadata,
 SponsorBlock data, recent-clip state, and the watched-history database are not
 synced. Disabling the option stops future mirroring; an existing browser-sync
 copy may remain under the browser vendor's retention and deletion rules. The

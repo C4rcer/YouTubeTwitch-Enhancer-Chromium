@@ -16,6 +16,59 @@ Google, Twitch, Amazon, or the named community services.
 
 **[♥ Support development on Ko-fi](https://ko-fi.com/carcer7378)**
 
+## Shared playback, YouTube workspace, and safer settings (v4.8)
+
+Version 4.8 adds a local shared feature layer without a custom backend or new
+host permissions:
+
+- **Configurable player actions.** Map keyboard chords, auxiliary mouse buttons,
+  and player-wheel gestures to play/pause, seeking, frame stepping, speed,
+  volume, mute, screenshots, loop, cinema, captions, chapters, live edge, and
+  Twitch chat overlay actions. The existing **[**, **]**, and **\** speed keys
+  remain the defaults. Bindings are ignored while typing and conflicts or
+  browser-reserved shortcuts are rejected in settings.
+- **Playback profiles.** Named, duplicable profiles can set speed, volume boost,
+  preferred quality, captions, compressor state, and site scope. Profiles can
+  be global or assigned to a YouTube/Twitch channel; unavailable quality levels
+  fall back to rendered/native choices. The active player chip explains whether
+  the profile came from the global choice or a channel rule.
+- **Transcript and chapter workspace.** YouTube watch pages gain a dock that
+  reads the transcript already rendered by YouTube, searches cues, follows the
+  active timestamp, seeks on selection, copies/exports timestamped text, and
+  navigates chapters. It makes no transcript API request.
+- **Local subscription collections.** Create, colour, order, duplicate, import,
+  and export collections of channel identities already present in YouTube's
+  rendered DOM. The Subscriptions feed can be filtered to a collection or to
+  uncollected channels without changing native subscriptions.
+- **Progressive settings and safety.** Both managers now have site navigation,
+  search, a sticky contents bar, persisted collapsible sections, Basic/Advanced
+  views, light/dark/system themes, named settings presets, redacted diagnostics,
+  recent destructive actions with bounded undo, import preview with selective
+  merge/replace, and an automatic backup before reset. Lists over 500 rows are
+  sorted and paged instead of rendering without a bound.
+- **Bounded player recovery and live controls.** Recoverable rendered player/media
+  failures retry with exponential backoff, a visible attempt status, and a
+  cancel button; retries stop at the configured limit. Repeated failures can
+  step down through quality options that Twitch has already rendered. Live
+  streams show a best-effort buffer delay and a live-edge action; VOD/clip seek
+  steps are configurable from 1–60 seconds.
+- **Local sidebar favourites, groups, and search.** Followed-channel entries can
+  be pinned, searched, grouped, reordered, imported, and exported using channel
+  logins already present in Twitch links. Native entries, live/offline metadata,
+  and navigation remain owned by Twitch; recycled or duplicate rows are cleaned
+  without deleting Twitch nodes.
+- **Theater/fullscreen chat overlay.** Move the existing chat DOM into a
+  reversible overlay with left/right placement, width, opacity, font scale,
+  auto-hide, and click-through options. The message input stays unavailable in
+  passive mode and is restored with the original chat layout when disabled.
+
+The new transcript, collections, player recovery, sidebar groups, chat overlay,
+profiles, input actions, diagnostics, presets, import/export, and undo features
+make no external request. Optional browser sync stays quota-aware: collections
+and sidebar membership are capped before they join the existing supported-list
+payload; watched history, profiles, settings, diagnostics, and recent actions
+are never synced.
+
 ## YouTube features
 
 - **Block entire channels.** Open a video's **⋮ menu** and click the injected
@@ -192,14 +245,25 @@ the manifest's `icons/` paths. `build.ps1` writes proper forward-slash entries.
 The regression suite has no npm dependencies:
 
 ```powershell
-node --test --test-isolation=none tests/content-filter.test.js tests/watched-db.test.js
+# PowerShell
+$tests = Get-ChildItem tests -Filter *.test.js | ForEach-Object { $_.FullName }
+node --test --test-isolation=none $tests
+
+# bash/zsh
+node --test --test-isolation=none tests/*.test.js
 ```
 
 It covers 600-card channels, incremental continuation batches, hydration and
 renderer recycling, filter precedence, DeArrow/SponsorBlock identity,
 watch-page SPA navigation and queue behaviour, watched-history sharding/retry,
-simultaneous tabs, distributed clears, migration and deterministic Undo
-convergence.
+simultaneous tabs, distributed clears, migration, deterministic Undo
+convergence, and the Chromium MAIN-world player/idle bridge fallbacks. The
+suites added in 4.8 also cover chord parsing/conflicts/editable targets,
+profile normalization and rule precedence, transcript/chapter parsing,
+collection JSON/CSV round trips and filtering, Twitch recovery/quality/live-delay
+helpers, dirty-subtree processing and recycled sidebar identities, overlay and
+diagnostics normalization, settings import/undo helpers, and popup
+ARIA/keyboard relationships.
 
 ## Usage
 
@@ -266,9 +330,21 @@ data, network requests, identifiers and retention controls.
   from the page, so the content scripts can't reach YouTube's player API or
   Twitch's React fibers directly (on Firefox they can, via
   `wrappedJSObject`); instead they relay `postMessage` requests that these
-  helpers answer: max quality, playback rate and watch-page player identity on
-  YouTube; the Slate chat editor, channel id, stream start time, and the
-  anonymous-chat WebSocket shim on Twitch.
+  helpers answer: max quality, playback-profile quality, playback rate and
+  watch-page player identity on YouTube; the Slate chat editor, channel id,
+  stream start time, and the anonymous-chat WebSocket shim on Twitch.
+- **`src/feature-core.js`** (loaded before the other scripts on both sites, in
+  the settings pages and in the service worker) holds the pure, browser-neutral
+  schema and normalization layer for the 4.8 features: input bindings, playback
+  profiles, collections, sidebar data, diagnostics redaction and import/merge.
+- **`src/player-controls.js`** runs the configurable keyboard/mouse/wheel
+  bindings and the playback-profile runtime on both sites;
+  **`src/youtube-workspace.js`** implements the transcript/chapter workspace
+  and subscription collections; **`src/twitch-experience.js`** implements
+  player recovery, live-edge/delay, sidebar favourites/groups/search and the
+  chat overlay; **`src/settings-enhancements.js`** drives the shared settings
+  navigation, search, themes, presets, privacy summary, import preview and
+  undo on both manager pages.
 - **`src/background.js`** registers the right-click menus, opens the
   onboarding page on first install, relays the SponsorBlock / DeArrow / RYD
   and emote-API lookups (so page CSP and CORS never interfere), and mirrors
@@ -295,6 +371,11 @@ src/
   twitch.js      twitch.css     — the on-page engine (Twitch)
   page-quality.js               — MAIN-world YouTube player helper (Chromium-only)
   page-twitch.js                — MAIN-world Twitch page-internals helper (Chromium-only)
+  feature-core.js               — pure shared schema/normalization layer (v4.8)
+  player-controls.js/.css       — input bindings + playback-profile runtime (v4.8)
+  youtube-workspace.js/.css     — transcript/chapter dock + collections (v4.8)
+  twitch-experience.js/.css     — recovery, live edge, sidebar, chat overlay (v4.8)
+  settings-enhancements.js/.css — shared settings UX layer (v4.8)
   background.js                 — context menus, onboarding, API relays, browser sync
   background-sw.js              — MV3 service-worker entry (importScripts)
   common.js                     — shared storage/import/export helpers
@@ -306,6 +387,13 @@ src/
 tests/
   content-filter.test.js        — 600-card/incremental DOM regression harness
   watched-db.test.js            — storage, retry and cross-tab regressions
+  feature-core.test.js          — shared schema/normalization regressions
+  common-features.test.js       — common.js merge/sync payload regressions
+  player-controls.test.js       — binding + profile runtime regressions
+  youtube-workspace.test.js     — transcript/chapter/collection regressions
+  twitch-experience.test.js     — recovery/live-delay/sidebar/overlay regressions
+  settings-enhancements.test.js — settings helper regressions
+  ui-accessibility.test.js      — static ARIA/labelling checks on the pages
 CHANGELOG.md                    — release changes
 STORE-LISTING.md                — Chrome Web Store fields and upload checklist
 ```

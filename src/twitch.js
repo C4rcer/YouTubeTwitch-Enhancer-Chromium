@@ -71,7 +71,10 @@
         twShotButton: true,
         twSpeedHotkeys: true,
         twUptime: true,
-        twHoverPreviews: true
+        twHoverPreviews: true,
+        twPlayerRecovery: true,
+        twSidebarTools: true,
+        twChatOverlayButton: true
     };
 
     /* ==================================================================
@@ -95,9 +98,11 @@
         twitchHighlightKeywords: [],
         twitchChatBlockKeywords: [],
         twitchChatBlockUsers: [],
+        inputBindings: {},
         settings: Object.assign({}, DEFAULT_SETTINGS)
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
+    let sharedInputActionsEnabled = false;
     let blockedLogins = new Set();
     let blockedChanNames = new Set();
     let blockedCatSlugs = new Set();
@@ -111,6 +116,21 @@
     let lastSerialized = '';
     let lastContextTarget = null;
     let lastClaimAt = 0;
+    let rawStorageData = {};
+    let twitchExperience = null;
+    let filterConfigVersion = 0;
+    let articleCache = new WeakMap();
+    let categoryCardCache = new WeakMap();
+    let sideNavCache = new WeakMap();
+    const cardRecoveryQueue = new Set();
+    let mainObserver = null;
+    let maintenanceTimer = null;
+    const lifecycleIntervals = new Set();
+
+    const TWITCH_CARD_SELECTOR =
+        'article, a[data-a-target="tw-box-art-card-link"], .side-nav-card';
+    const CARD_MUTATION_LIMIT = 1500;
+    const CARD_RECOVERY_LIMIT = 60;
 
     // Single-segment paths that are twitch pages, not channel logins.
     const RESERVED_PATHS = new Set([
@@ -160,6 +180,8 @@
             twitchHighlightKeywords: cleanList(d.twitchHighlightKeywords),
             twitchChatBlockKeywords: cleanList(d.twitchChatBlockKeywords),
             twitchChatBlockUsers: cleanList(d.twitchChatBlockUsers).map(u => u.toLowerCase()),
+            inputBindings: d.inputBindings && typeof d.inputBindings === 'object'
+                ? d.inputBindings : {},
             settings: Object.assign({}, DEFAULT_SETTINGS, d.settings || {})
         };
     }
@@ -193,6 +215,13 @@
 
     function rebuildDerived() {
         settings = Object.assign({}, DEFAULT_SETTINGS, state.settings);
+        sharedInputActionsEnabled = typeof YTBFeatures !== 'undefined' &&
+            YTBFeatures.normalizeInputBindings(state.inputBindings).twitch.enabled;
+        filterConfigVersion++;
+        articleCache = new WeakMap();
+        categoryCardCache = new WeakMap();
+        sideNavCache = new WeakMap();
+        cardRecoveryQueue.clear();
         blockedLogins = new Set();
         blockedChanNames = new Set();
         for (const c of state.twitchBlockedChannels) {
@@ -241,6 +270,8 @@
             full.twitchBlockedKeywords = state.twitchBlockedKeywords;
             full.settings = Object.assign({}, full.settings, state.settings);
             lastSerialized = JSON.stringify(normalize(full));
+            rawStorageData = full;
+            if (twitchExperience) twitchExperience.updateState(rawStorageData);
             await api.storage.local.set({ [STORAGE_KEY]: full });
         } catch (e) {
             console.warn('[YT/Twitch Enhancer] Could not persist:', e);
@@ -334,8 +365,12 @@
         // Reruns: the corner status badge reads "Rerun" on rebroadcasts.
         if (settings.twHideReruns) {
             for (const b of art.querySelectorAll(
-                '.stream-type-indicator--rerun, [class*="status-text-indicator" i], [class*="stream-type-indicator" i], [class*="media-card-stat" i]')) {
-                if (/^\s*rerun\s*$/i.test(b.textContent || '') ||
+                '[data-a-target*="rerun" i], [data-test-selector*="rerun" i], ' +
+                '.stream-type-indicator--rerun, [class*="status-text-indicator" i], ' +
+                '[class*="stream-type-indicator" i], [class*="media-card-stat" i]')) {
+                if (/rerun/i.test((b.getAttribute && (b.getAttribute('data-a-target') ||
+                        b.getAttribute('data-test-selector'))) || '') ||
+                    /^\s*rerun\s*$/i.test(b.textContent || '') ||
                     /rerun/i.test(String(b.className))) return true;
             }
         }
@@ -349,28 +384,208 @@
         return false;
     }
 
-    function scanCards() {
-        // Stream cards everywhere (front page, directory, search, channel pages).
-        for (const art of document.querySelectorAll('article')) {
-            setHidden(cellOf(art) || art, articleBlocked(art));
+    function articleIdentity(art) {
+        let login = '';
+        let channelHref = '';
+        for (const anchor of art.querySelectorAll('a[href]')) {
+            const href = anchor.getAttribute('href') || '';
+            const candidate = loginFromHref(href);
+            if (candidate) {
+                login = candidate;
+                channelHref = href;
+                break;
+            }
         }
-        // Category cards in the Browse grid.
-        for (const link of document.querySelectorAll('a[data-a-target="tw-box-art-card-link"]')) {
-            const slug = catSlugFromHref(link.getAttribute('href'));
-            const hide = !!(slug && blockedCatSlugs.has(slug));
-            setHidden(cellOf(link) || link.closest('.game-card'), hide);
+        const category = art.querySelector(
+            'a[href^="/directory/category/"], a[href^="/directory/game/"]'
+        );
+        const categoryHref = category && category.getAttribute('href') || '';
+        const categoryText = category && (category.textContent || '').trim().toLowerCase() || '';
+        const titleNode = art.querySelector('h4[title], h3[title], h4, h3');
+        const title = titleNode &&
+            (titleNode.getAttribute('title') || titleNode.textContent || '').trim().toLowerCase() || '';
+        let tags = '';
+        if (blockedTagNames.size) {
+            tags = [...art.querySelectorAll(
+                'button[data-a-target="tag"], .tw-tag, a[href*="/directory/all/tags/"], ' +
+                '[class*="tag-button" i]'
+            )].map(tag => (tag.textContent || '').trim().toLowerCase()).join('|');
         }
-        // Side nav rows (followed + recommended channels, followed categories).
-        for (const card of document.querySelectorAll('.side-nav-card')) {
-            const a = card.matches('a[href]') ? card : card.querySelector('a[href]');
-            if (!a) continue;
-            const href = a.getAttribute('href') || '';
+        let names = '';
+        if (blockedChanNames.size) {
+            names = [...art.querySelectorAll('p')]
+                .map(node => (node.textContent || '').trim().toLowerCase())
+                .filter(text => text && text.length <= 30).join('|');
+        }
+        let rerun = '';
+        if (settings.twHideReruns) {
+            rerun = [...art.querySelectorAll(
+                '[data-a-target*="rerun" i], [data-test-selector*="rerun" i], ' +
+                '.stream-type-indicator--rerun, [class*="status-text-indicator" i], ' +
+                '[class*="stream-type-indicator" i], [class*="media-card-stat" i]'
+            )].map(node => String(node.className) + ':' + (node.textContent || '').trim()).join('|');
+        }
+        return {
+            key: [channelHref, login, categoryHref, categoryText, title, tags, names, rerun].join('\u001f'),
+            complete: !!(login || categoryHref || title)
+        };
+    }
+
+    function processArticle(art, force) {
+        if (!art || art.isConnected === false) return;
+        const identity = articleIdentity(art);
+        const cached = articleCache.get(art);
+        let hide;
+        if (!force && cached && cached.version === filterConfigVersion &&
+                cached.identity === identity.key) {
+            hide = cached.hide;
+        } else {
+            hide = articleBlocked(art);
+            articleCache.set(art, {
+                version: filterConfigVersion,
+                identity: identity.key,
+                hide
+            });
+        }
+        setHidden(cellOf(art) || art, hide);
+        if (identity.complete) cardRecoveryQueue.delete(art);
+        else cardRecoveryQueue.add(art);
+    }
+
+    function processCategoryCard(link, force) {
+        if (!link || link.isConnected === false) return;
+        const href = link.getAttribute('href') || '';
+        const cached = categoryCardCache.get(link);
+        let hide;
+        if (!force && cached && cached.version === filterConfigVersion && cached.href === href) {
+            hide = cached.hide;
+        } else {
+            const slug = catSlugFromHref(href);
+            hide = !!(slug && blockedCatSlugs.has(slug));
+            categoryCardCache.set(link, { version: filterConfigVersion, href, hide });
+        }
+        setHidden(cellOf(link) || link.closest('.game-card'), hide);
+        if (href) cardRecoveryQueue.delete(link);
+        else cardRecoveryQueue.add(link);
+    }
+
+    function processSideNavCard(card, force) {
+        if (!card || card.isConnected === false) return;
+        const anchor = card.matches('a[href]') ? card : card.querySelector('a[href]');
+        const href = anchor && anchor.getAttribute('href') || '';
+        const cached = sideNavCache.get(card);
+        let hide;
+        if (!force && cached && cached.version === filterConfigVersion && cached.href === href) {
+            hide = cached.hide;
+        } else {
             const login = loginFromHref(href);
             const slug = catSlugFromHref(href);
-            const hide = (login && blockedLogins.has(login)) || (slug && blockedCatSlugs.has(slug));
-            const wrap = card.closest('.tw-transition') || card;
-            if (hide) wrap.classList.add('ytbtw-removed');
-            else wrap.classList.remove('ytbtw-removed');
+            hide = !!((login && blockedLogins.has(login)) ||
+                (slug && blockedCatSlugs.has(slug)));
+            sideNavCache.set(card, { version: filterConfigVersion, href, hide });
+        }
+        const wrap = card.closest('.tw-transition') || card;
+        setHidden(wrap, hide);
+        if (href) cardRecoveryQueue.delete(card);
+        else cardRecoveryQueue.add(card);
+    }
+
+    function processCardElement(element, force) {
+        if (!element || !element.matches) return;
+        if (element.matches('article')) processArticle(element, force);
+        else if (element.matches('a[data-a-target="tw-box-art-card-link"]')) {
+            processCategoryCard(element, force);
+        } else if (element.matches('.side-nav-card')) {
+            processSideNavCard(element, force);
+        }
+    }
+
+    function cardElementsIn(root) {
+        const elements = new Set();
+        if (!root) return elements;
+        const element = root.nodeType === 1 || root.nodeType === 9
+            ? root : root.parentElement;
+        if (!element) return elements;
+        try {
+            if (element.matches && element.matches(TWITCH_CARD_SELECTOR)) elements.add(element);
+            if (element.querySelectorAll) {
+                for (const match of element.querySelectorAll(TWITCH_CARD_SELECTOR)) {
+                    elements.add(match);
+                }
+            }
+        } catch (e) { /* Twitch may replace the subtree while it is queried */ }
+        return elements;
+    }
+
+    function scanCards(root, force) {
+        for (const element of cardElementsIn(root || document)) {
+            processCardElement(element, force !== false);
+        }
+    }
+
+    function addMutationCard(set, node, includeDescendants) {
+        if (set.size >= CARD_MUTATION_LIMIT) return;
+        const element = node && (node.nodeType === 1 ? node : node.parentElement);
+        if (!element) return;
+        try {
+            if (element.matches && element.matches(TWITCH_CARD_SELECTOR)) set.add(element);
+            const closest = element.closest && element.closest(TWITCH_CARD_SELECTOR);
+            if (closest) set.add(closest);
+            if (!includeDescendants || !element.querySelectorAll) return;
+            for (const match of element.querySelectorAll(TWITCH_CARD_SELECTOR)) {
+                set.add(match);
+                if (set.size >= CARD_MUTATION_LIMIT) break;
+            }
+        } catch (e) { /* detached/recycled node */ }
+    }
+
+    function collectDirtyCardElements(records) {
+        const experienceModule = typeof globalThis !== 'undefined' &&
+            globalThis.YTBTW_TWITCH_EXPERIENCE;
+        if (experienceModule && typeof experienceModule.collectMutationElements === 'function') {
+            return experienceModule.collectMutationElements(
+                records, TWITCH_CARD_SELECTOR, CARD_MUTATION_LIMIT
+            );
+        }
+        const dirty = new Set();
+        for (const record of records || []) {
+            if (!record) continue;
+            // A child-list target can be document.body. Only its nearest card
+            // is relevant; descendants are collected from newly inserted roots.
+            addMutationCard(dirty, record.target, false);
+            if (record.type === 'childList') {
+                for (const node of record.addedNodes || []) {
+                    addMutationCard(dirty, node, true);
+                    if (dirty.size >= CARD_MUTATION_LIMIT) break;
+                }
+            }
+            if (dirty.size >= CARD_MUTATION_LIMIT) break;
+        }
+        return dirty;
+    }
+
+    function processCardMutations(records) {
+        const experienceModule = typeof globalThis !== 'undefined' &&
+            globalThis.YTBTW_TWITCH_EXPERIENCE;
+        if (experienceModule && typeof experienceModule.processMutationElements === 'function') {
+            return experienceModule.processMutationElements(
+                records,
+                TWITCH_CARD_SELECTOR,
+                CARD_MUTATION_LIMIT,
+                element => processCardElement(element, false)
+            );
+        }
+        const dirty = collectDirtyCardElements(records);
+        for (const element of dirty) processCardElement(element, false);
+        return dirty;
+    }
+
+    function processCardRecovery(limit) {
+        let remaining = Math.max(1, Number(limit) || CARD_RECOVERY_LIMIT);
+        for (const element of [...cardRecoveryQueue]) {
+            if (remaining-- <= 0) break;
+            cardRecoveryQueue.delete(element);
+            if (element && element.isConnected !== false) processCardElement(element, true);
         }
     }
 
@@ -397,6 +612,9 @@
         if (!settings.twEnabled || !settings.twAutoClaim) return;
         if (Date.now() - lastClaimAt < 5000) return;   // debounce double-fires
         const hit = document.querySelector(
+            '[data-test-selector="community-points-summary"] .claimable-bonus__icon, ' +
+            '[data-test-selector="community-points-summary"] [data-test-selector*="claim" i], ' +
+            '[data-test-selector="community-points-summary"] [data-a-target*="claim" i], ' +
             '[data-test-selector="community-points-summary"] button[aria-label*="Claim"], ' +
             'button[aria-label*="Claim Bonus"], .claimable-bonus__icon'
         );
@@ -433,10 +651,16 @@
     // Claim every "Claim" control on the current inventory page (styled <a>
     // or <button>, exact text, not disabled). Returns how many were clicked.
     function claimInventoryHere() {
-        const els = [...document.querySelectorAll('a.ScCoreButton-sc-ocjdkq-0, main a, button')]
-            .filter(b => /^claim$/i.test((b.textContent || '').trim()) && !b.disabled &&
-                         // ignore the popover link that just points back here
-                         b.getAttribute('href') !== '/drops/inventory');
+        const els = [...document.querySelectorAll(
+            'main a[data-a-target*="claim" i], main button[data-a-target*="claim" i], ' +
+            'main a[data-test-selector*="claim" i], main button[data-test-selector*="claim" i], ' +
+            'a.ScCoreButton-sc-ocjdkq-0, main a, main button'
+        )].filter(b => {
+            const stable = ((b.getAttribute('data-a-target') || '') + ' ' +
+                (b.getAttribute('data-test-selector') || '')).toLowerCase().includes('claim');
+            return (stable || /^claim$/i.test((b.textContent || '').trim())) && !b.disabled &&
+                b.getAttribute('href') !== '/drops/inventory';
+        });
         let n = 0;
         for (const el of els) { try { el.click(); n++; } catch (e) { /* ignore */ } }
         return n;
@@ -492,6 +716,9 @@
         if (!settings.twEnabled || !settings.twAutoClaimMoments) return;
         if (Date.now() - lastMomentClaimAt < 5000) return;
         const hit = document.querySelector(
+            '[data-test-selector*="moment" i] [data-test-selector*="claim" i], ' +
+            '[data-test-selector*="moment" i] [data-a-target*="claim" i], ' +
+            '[data-a-target*="moment" i][data-a-target*="claim" i], ' +
             'button[aria-label*="Claim Moment"], [data-test-selector*="moment" i] button[aria-label*="Claim"]'
         );
         if (!hit) return;
@@ -681,7 +908,8 @@
     }
     document.addEventListener('click', (e) => {
         if (retired || !e.target.closest) return;
-        const b = e.target.closest('button[aria-label*="Clip" i]');
+        const b = e.target.closest('button[data-a-target="player-clip-button"], ' +
+            'button[data-test-selector="clip-button"], button[aria-label*="Clip" i]');
         if (b && !b.closest('#ytbtw-clipbar')) recordClipIntent();
     }, true);
     document.addEventListener('keydown', (e) => {
@@ -1003,7 +1231,14 @@
             if (!node.closest) return;
             const line = node.closest('.chat-line__message');
             if (!line || line.querySelector('.ytbtw-deleted-restored')) return;
-            const isNotice =
+            const stableNotice = node.matches && node.matches(
+                '[data-a-target*="deleted" i], [data-test-selector*="deleted" i], ' +
+                '[data-a-target*="removed" i], [data-test-selector*="removed" i]'
+            ) || node.closest && node.closest(
+                '[data-a-target*="deleted" i], [data-test-selector*="deleted" i], ' +
+                '[data-a-target*="removed" i], [data-test-selector*="removed" i]'
+            );
+            const isNotice = stableNotice ||
                 /deleted|removed/i.test(String(node.className)) ||
                 /message deleted|deleted by|removed by/i.test(node.textContent || '');
             if (!isNotice) return;
@@ -1568,7 +1803,7 @@
     }
 
     document.addEventListener('keydown', (e) => {
-        if (retired || !settings.twEnabled || !settings.twSpeedHotkeys || IS_MOBILE) return;
+        if (retired || sharedInputActionsEnabled || !settings.twEnabled || !settings.twSpeedHotkeys || IS_MOBILE) return;
         if (e.ctrlKey || e.altKey || e.metaKey) return;
         if (e.key !== '[' && e.key !== ']' && e.key !== '\\') return;
         const t = e.target;
@@ -1861,12 +2096,51 @@
     });
 
     /* ==================================================================
-     * 9. Main pass + boot
+     * 9. Incremental main pass + boot
      * ================================================================== */
-    function runAll() {
+    function initTwitchExperience() {
+        const module = typeof globalThis !== 'undefined' &&
+            globalThis.YTBTW_TWITCH_EXPERIENCE;
+        if (!module || typeof module.createController !== 'function') return;
+        try {
+            twitchExperience = module.createController({
+                api,
+                document,
+                window,
+                location,
+                console,
+                getVideo: playerVideo,
+                applyPlaybackProfile(detail) {
+                    if (!detail || detail.volumeBoost == null) return;
+                    const boost = Number(detail.volumeBoost);
+                    if (!Number.isFinite(boost)) return;
+                    const bounded = Math.min(5, Math.max(1, boost));
+                    if (bounded > 1) {
+                        if (ensureBoostGraph()) boostGain.gain.value = bounded;
+                    } else if (boostGain) {
+                        boostGain.gain.value = 1;
+                    }
+                },
+                toast
+            });
+            twitchExperience.updateState(rawStorageData);
+        } catch (e) {
+            twitchExperience = null;
+            console.warn('[YT/Twitch Enhancer] Twitch experience tools unavailable:', e);
+        }
+    }
+
+    function startLifecycleInterval(callback, ms) {
+        const id = setInterval(callback, ms);
+        lifecycleIntervals.add(id);
+        return id;
+    }
+
+    function runAll(fullScan) {
         if (retired) return;
+        const scan = fullScan !== false;
         if (!settings.twEnabled) {
-            unhideAll();
+            if (scan) unhideAll();
             ensureClipBar();
             ensureChatEngine();
             ensureClipDownload();
@@ -1875,7 +2149,7 @@
             hidePreview();
             return;
         }
-        scanCards();
+        if (scan) scanCards(document, true);
         pauseCarousel();
         runClaims();
         if (!IS_MOBILE) {
@@ -1890,74 +2164,171 @@
         }
     }
 
-    api.storage.onChanged.addListener((changes, area) => {
-        if (area !== 'local' || !changes[STORAGE_KEY]) return;
-        const incoming = JSON.stringify(normalize(changes[STORAGE_KEY].newValue));
+    function onStorageChanged(changes, area) {
+        if (retired || area !== 'local' || !changes[STORAGE_KEY]) return;
+        rawStorageData = changes[STORAGE_KEY].newValue || {};
+        if (twitchExperience) twitchExperience.updateState(rawStorageData);
+        const incoming = JSON.stringify(normalize(rawStorageData));
         if (incoming === lastSerialized) return;
         lastSerialized = incoming;
-        state = normalize(changes[STORAGE_KEY].newValue);
+        state = normalize(rawStorageData);
         settings = Object.assign({}, DEFAULT_SETTINGS, state.settings);
         if (!IS_CLIPS_HOST) {
             rebuildDerived();
-            runAll();
+            runAll(true);
         }
-    });
+    }
+    api.storage.onChanged.addListener(onStorageChanged);
+
+    function ownedExperienceNode(node) {
+        const element = node && (node.nodeType === 1 ? node : node.parentElement);
+        return !!(element && element.closest && element.closest(
+            '#ytbtw-player-experience, #ytbtw-player-panel, #ytbtw-sidebar-tools, ' +
+            '#ytbtw-sidebar-manager, #ytbtw-chat-overlay, .ytbtw-sidebar-actions'
+        ));
+    }
+
+    function mutationOnlyTouchesExperienceUi(record) {
+        if (!record) return true;
+        if (ownedExperienceNode(record.target)) return true;
+        if (record.type !== 'childList' || !record.addedNodes ||
+                !record.addedNodes.length) return false;
+        return [...record.addedNodes].every(ownedExperienceNode);
+    }
+
+    function mutationInsideChatMessages(record) {
+        const target = record && record.target && (record.target.nodeType === 1
+            ? record.target : record.target.parentElement);
+        return !!(target && target.closest &&
+            target.closest('.chat-scrollable-area__message-container'));
+    }
+
+    function mutationNeedsMaintenance(record) {
+        if (!record || record.type !== 'childList' || !record.addedNodes ||
+                mutationInsideChatMessages(record)) return false;
+        return [...record.addedNodes].some(node => node && node.nodeType === 1);
+    }
+
+    function scheduleMaintenance() {
+        if (retired || maintenanceTimer) return;
+        maintenanceTimer = setTimeout(() => {
+            maintenanceTimer = null;
+            runAll(false);
+        }, 180);
+    }
 
     function bootObserver() {
+        if (retired) return;
         if (!document.body) {
             requestAnimationFrame(bootObserver);
             return;
         }
-        let debounceTimer = null;
-        const schedule = () => {
-            if (debounceTimer) return;
-            debounceTimer = setTimeout(() => { debounceTimer = null; runAll(); }, 250);
-        };
-        const observer = new MutationObserver(schedule);
-        observer.observe(document.body, { childList: true, subtree: true });
-        runAll();
-        // The interval is the safety net for attribute-driven changes and,
-        // importantly, keeps auto-claim working in background tabs (people
-        // watch streams in another tab / on another monitor). Card scans are
-        // skipped while hidden; claiming and carousel-pausing are cheap.
-        setInterval(() => {
-            if (document.hidden) {
-                runClaims();
-                pauseCarousel();
-            } else {
-                runAll();
+        mainObserver = new MutationObserver(records => {
+            if (retired) return;
+            const relevant = records.filter(record => !mutationOnlyTouchesExperienceUi(record));
+            if (relevant.length) {
+                const structural = relevant.filter(record => !mutationInsideChatMessages(record));
+                if (structural.length) {
+                    processCardMutations(structural);
+                    if (twitchExperience) twitchExperience.processMutations(structural);
+                    if (structural.some(mutationNeedsMaintenance)) scheduleMaintenance();
+                }
             }
-        }, 2000);
-        // SPA navigation: refresh the quality timestamp so the next stream
-        // load still honours the pin, and re-run a pass.
+        });
+        mainObserver.observe(document.body, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+            attributes: true,
+            attributeFilter: ['href', 'title', 'data-a-target', 'aria-label']
+        });
+        runAll(true);
+        if (twitchExperience) twitchExperience.processRoot(document);
+
+        // Keep claims reliable in background tabs, but visible-tab maintenance
+        // no longer performs a document-wide article/sidebar scan. Only
+        // incomplete shells retained in the bounded recovery queue are revisited.
+        startLifecycleInterval(() => {
+            if (retired) return;
+            runClaims();
+            pauseCarousel();
+            processCardRecovery(CARD_RECOVERY_LIMIT);
+            if (!document.hidden) runAll(false);
+            if (twitchExperience) twitchExperience.maintenance();
+        }, 2500);
+
+        // SPA navigation gets one deliberate full classification pass. Ordinary
+        // hydration and list appends remain mutation-driven and incremental.
         let lastHref = location.href;
-        setInterval(() => {
-            if (location.href !== lastHref) {
-                lastHref = location.href;
-                applyQualityPin();
-                schedule();
-            }
+        startLifecycleInterval(() => {
+            if (retired || location.href === lastHref) return;
+            lastHref = location.href;
+            if (twitchExperience) twitchExperience.onNavigation();
+            applyQualityPin();
+            runAll(true);
         }, 500);
+    }
+
+    function retireInstance() {
+        if (retired) return;
+        retired = true;
+        if (mainObserver) {
+            mainObserver.disconnect();
+            mainObserver = null;
+        }
+        clearTimeout(maintenanceTimer);
+        maintenanceTimer = null;
+        for (const id of lifecycleIntervals) clearInterval(id);
+        lifecycleIntervals.clear();
+        if (twitchExperience) {
+            twitchExperience.retire();
+            twitchExperience = null;
+        }
+        if (chatObserver) {
+            chatObserver.disconnect();
+            chatObserver = null;
+        }
+        clearTimeout(batchTimer);
+        batchTimer = null;
+        for (const node of pendingReveal) {
+            if (node && node.classList) node.classList.remove('ytbtw-chat-pending');
+        }
+        pendingReveal = [];
+        exitCinema();
+        hidePreview();
+        closeEmotePanel();
+        clearTimeout(toastTimer);
+        try {
+            if (api.storage.onChanged && typeof api.storage.onChanged.removeListener === 'function') {
+                api.storage.onChanged.removeListener(onStorageChanged);
+            }
+        } catch (e) { /* extension context may already be invalid */ }
+        document.removeEventListener(TAKEOVER_EVENT, retireInstance, true);
     }
 
     async function init() {
         try {
             document.dispatchEvent(new CustomEvent(TAKEOVER_EVENT));
-            document.addEventListener(TAKEOVER_EVENT, () => { retired = true; }, true);
+            document.addEventListener(TAKEOVER_EVENT, retireInstance, true);
         } catch (e) { /* ignore */ }
         try {
             const stored = await api.storage.local.get(STORAGE_KEY);
-            state = normalize(stored[STORAGE_KEY]);
+            rawStorageData = stored[STORAGE_KEY] || {};
+            state = normalize(rawStorageData);
         } catch (e) {
+            rawStorageData = {};
             state = normalize(null);
         }
+        if (retired) return;
         lastSerialized = JSON.stringify(state);
+        settings = Object.assign({}, DEFAULT_SETTINGS, state.settings);
+        if (!IS_MOBILE) initTwitchExperience();
         if (IS_CLIPS_HOST) {
-            // Clip-recorder mode + the download button; no card scanning.
-            settings = Object.assign({}, DEFAULT_SETTINGS, state.settings);
-            setInterval(() => {
+            // Clip-recorder mode + local player controls; no card scanning.
+            startLifecycleInterval(() => {
                 clipsRecorderTick();
                 ensureClipDownload();
+                if (twitchExperience) twitchExperience.maintenance();
             }, 1500);
             return;
         }

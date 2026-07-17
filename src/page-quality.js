@@ -18,6 +18,12 @@
  *   ytb-lact                   refresh YouTube's idle timer global so
  *                              the "Continue watching?" prompt stays
  *                              away ("never pause me").
+ *   ytb-profile-quality
+ *              { quality }     apply a playback-profile quality preference
+ *                              ("max" or a height like "1080"), falling back
+ *                              to the nearest available level — the same
+ *                              selection player-controls.js performs directly
+ *                              on Firefox.
  *
  * Runs in the page world: no extension APIs, no storage access.
  * ================================================================== */
@@ -66,6 +72,36 @@
                 videoId,
                 title
             }, location.origin);
+            return;
+        }
+
+        if (e.data.type === 'ytb-profile-quality') {
+            const requested = String(e.data.quality || '');
+            if (!requested || requested === 'current') return;
+            const player = document.getElementById('movie_player');
+            if (!player || typeof player.getAvailableQualityLevels !== 'function') return;
+            let available;
+            try { available = player.getAvailableQualityLevels(); } catch (err) { return; }
+            if (!available || !available.length) return;
+            const map = {
+                '2160': 'hd2160', '1440': 'hd1440', '1080': 'hd1080',
+                '720': 'hd720', '480': 'large', '360': 'medium'
+            };
+            const order = ['highres', 'hd4320', 'hd2880', 'hd2160', 'hd1440',
+                'hd1080', 'hd720', 'large', 'medium', 'small', 'tiny'];
+            let quality = requested === 'max' ? available[0] : map[requested];
+            if (!available.includes(quality)) {
+                const want = order.indexOf(quality);
+                quality = available
+                    .slice()
+                    .sort((a, b) => order.indexOf(a) - order.indexOf(b))
+                    .find(level => order.indexOf(level) >= want) ||
+                    available[available.length - 1];
+            }
+            try {
+                if (typeof player.setPlaybackQualityRange === 'function') player.setPlaybackQualityRange(quality, quality);
+                if (typeof player.setPlaybackQuality === 'function') player.setPlaybackQuality(quality);
+            } catch (err) { /* player API changed; leave native setting alone */ }
             return;
         }
 

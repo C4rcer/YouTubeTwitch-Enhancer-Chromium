@@ -3,4 +3,4 @@
  * background file, so this just pulls in the same scripts the Firefox
  * manifest loads directly. Not referenced by the Firefox manifest.
  * ================================================================== */
-importScripts('common.js', 'background.js');
+importScripts('feature-core.js', 'common.js', 'background.js');

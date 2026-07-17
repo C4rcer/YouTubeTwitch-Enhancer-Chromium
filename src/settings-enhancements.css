@@ -1,0 +1,220 @@
+/* Progressive settings navigation and feature editors. */
+
+.ytb-settings-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: grid;
+    grid-template-columns: auto minmax(180px, 1fr) auto auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: color-mix(in srgb, var(--bg) 94%, transparent);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(10px);
+}
+
+.ytb-site-nav,
+.ytb-mode-group {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--panel-2);
+}
+
+.ytb-site-nav a,
+.ytb-mode-group button {
+    border: 0;
+    border-radius: 999px;
+    padding: 5px 10px;
+    color: var(--muted);
+    background: transparent;
+    font-size: 12px;
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+.ytb-site-nav a:hover { text-decoration: none; color: var(--text); }
+.ytb-site-nav a.active,
+.ytb-mode-group button.active { color: #fff; background: var(--accent); }
+.ytb-site-nav a.active.twitch { background: var(--twitch, #9147ff); }
+
+.ytb-settings-search { min-width: 0; }
+.ytb-search-status { min-width: 58px; font-size: 12px; text-align: right; }
+.ytb-save-status { min-width: 58px; color: var(--muted); text-align: right; }
+.ytb-import-mode { display: grid; gap: 4px; max-width: 280px; margin: 8px 0; color: var(--muted); }
+
+.ytb-settings-toc {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    padding: 7px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+}
+
+.ytb-settings-toc a {
+    flex: 0 0 auto;
+    padding: 3px 8px;
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.ytb-settings-toc a:hover,
+.ytb-settings-toc a:focus-visible { color: var(--text); background: var(--panel-2); text-decoration: none; }
+
+.ytb-settings-section { scroll-margin-top: 108px; }
+.ytb-settings-section.ytb-search-hidden { display: none !important; }
+.ytb-settings-section > h2 {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.ytb-collapse {
+    width: 22px;
+    min-width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    color: var(--muted);
+    background: transparent;
+    line-height: 1;
+}
+
+.ytb-settings-section.ytb-collapsed > :not(h2) { display: none !important; }
+.ytb-dynamic-section { border-top: 1px solid var(--border); }
+.ytb-section-description { margin: 0 0 12px; font-size: 12px; }
+.ytb-dynamic-section h3 { margin: 16px 0 6px; font-size: 12px; }
+.ytb-dynamic-section textarea { width: 100%; resize: vertical; }
+.ytb-action-row, .ytb-reset-row { flex-wrap: wrap; margin-top: 10px; }
+
+.ytb-bindings-table {
+    display: grid;
+    gap: 3px;
+    overflow-x: auto;
+    margin-top: 8px;
+}
+
+.ytb-binding-head,
+.ytb-binding-row {
+    display: grid;
+    grid-template-columns: minmax(150px, 1.25fr) minmax(170px, 1.2fr) minmax(105px, .8fr) minmax(105px, .8fr);
+    align-items: center;
+    gap: 6px;
+    min-width: 580px;
+    padding: 5px 7px;
+    border-radius: 7px;
+}
+
+.ytb-binding-head { color: var(--muted); font-size: 12px; }
+.ytb-binding-row:nth-child(even) { background: color-mix(in srgb, var(--panel-2) 70%, transparent); }
+.ytb-binding-row > span { font-weight: 550; }
+.ytb-binding-row input,
+.ytb-binding-row select { min-width: 0; width: 100%; padding: 6px 7px; font-size: 12px; }
+.ytb-binding-row input[readonly] { cursor: pointer; }
+
+.ytb-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.ytb-form-grid label {
+    display: grid;
+    gap: 4px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.ytb-form-grid input,
+.ytb-form-grid select { width: 100%; }
+.ytb-site-checks { margin: 10px 0; }
+.ytb-site-checks label { cursor: pointer; }
+.ytb-site-checks input { accent-color: var(--accent); }
+.ytb-add-profile { margin-top: 12px; }
+
+.ytb-preset-list,
+.ytb-recent-list { margin-top: 10px; }
+
+.ytb-privacy-list { display: grid; gap: 7px; }
+.ytb-privacy-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    padding: 9px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+}
+.ytb-privacy-row small { display: block; margin-top: 2px; color: var(--muted); }
+.ytb-state {
+    min-width: 48px;
+    padding: 2px 7px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    text-align: center;
+}
+.ytb-state.active { color: #fff; border-color: var(--ok); background: var(--ok); }
+
+.ytb-import-preview {
+    margin-top: 10px;
+    padding: 9px;
+    border: 1px solid var(--accent-2);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent-2) 10%, transparent);
+}
+
+.ytb-import-categories {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    margin: 10px 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+.ytb-import-categories label { cursor: pointer; }
+.ytb-import-categories input { accent-color: var(--accent); }
+.ytb-sync-toggle { margin-top: 12px; }
+
+.ytb-diagnostics {
+    max-height: 260px;
+    overflow: auto;
+    margin: 0 0 8px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+    color: var(--text);
+    font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+@media (max-width: 680px) {
+    .ytb-settings-toolbar { grid-template-columns: 1fr auto; }
+    .ytb-site-nav { order: 1; }
+    .ytb-mode-group { order: 2; justify-self: end; }
+    .ytb-settings-search { order: 3; }
+    .ytb-search-status { display: none; }
+    .ytb-settings-toolbar > select { order: 4; min-width: 0; }
+    .ytb-form-grid, .ytb-import-categories { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ytb-settings-toolbar { backdrop-filter: none; }
+}
+
+@media (forced-colors: active) {
+    .ytb-site-nav a.active,
+    .ytb-mode-group button.active,
+    .ytb-state.active { border: 1px solid ButtonText; forced-color-adjust: auto; }
+}

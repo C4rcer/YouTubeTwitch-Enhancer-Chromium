@@ -55,6 +55,7 @@ class FakeTile {
         this.isPlaylist = !!options.isPlaylist;
         this.isMembers = !!options.isMembers;
         this.isPaid = !!options.isPaid;
+        this.paidText = options.paidText || 'Pay to watch';
         this.setVideo(id);
     }
 
@@ -103,9 +104,10 @@ class FakeTile {
             return [this.videoAnchor, this.channelAnchor].filter(Boolean);
         }
         if (selector === 'badge-shape.ytBadgeShapeCommerce') {
+            const paidText = this.paidText;
             return this.isPaid ? [{
-                textContent: 'Pay to watch',
-                getAttribute: name => name === 'aria-label' ? 'Pay to watch' : null
+                textContent: paidText,
+                getAttribute: name => name === 'aria-label' ? paidText : null
             }] : [];
         }
         if (selector.includes('ytd-badge-supported-renderer')) {
@@ -143,6 +145,14 @@ function loadContentHarness(watched, options = {}) {
     const timeouts = new Map();
     const watchTitle = options.watchTitle || null;
     const flexyData = options.flexyData || null;
+    // Tests that pass playerData exercise the direct player path (a browser
+    // exposing the page-world API); bridge tests use setElement + messages.
+    const playerData = options.playerData || null;
+    if (playerData) {
+        elements.set('movie_player', {
+            getVideoData() { return playerData; }
+        });
+    }
     const watchFlexy = flexyData ? {
         getAttribute(name) { return name === 'video-id' ? flexyData.videoId : null; }
     } : null;
@@ -224,6 +234,7 @@ function loadContentHarness(watched, options = {}) {
     const hook = `
     self.__YTB_FILTER_TEST__ = {
         filterMutatedTiles,
+        isPaidBadgeText,
         processTiles(tiles, force = true) { processTiles(new Set(tiles), force, false); },
         processLegacyMutationFilters,
         prepareDeArrowTitleIdentity,
@@ -839,6 +850,149 @@ test('watch-page DeArrow repairs a stale SPA title through the Chromium player b
         'the bounded retry budget must enter cooldown after exhaustion');
 });
 
+test('watch-page DeArrow releases a reused heading across later navigations', () => {
+    const title = new FakeDecoratedText('Native A');
+    const playerData = { video_id: 'video-a', title: 'Native A' };
+    const flexyData = { videoId: 'video-a' };
+    const api = loadContentHarness(
+        new Set(), { watchTitle: title, playerData, flexyData }
+    );
+
+    api.configure({ settings: { enabled: true, deArrowTitles: true } });
+    api.setPath('/watch?v=video-a');
+    api.setDeArrowCache('video-a', { title: 'Community A' });
+    api.processDeArrowWatchPage();
+    assert.equal(title.textContent, 'Community A');
+
+    // End-screen click to video B (no community title). Firefox reuses the
+    // heading unhydrated; the repair path recovers B's native title.
+    api.setPath('/watch?v=video-b');
+    flexyData.videoId = 'video-b';
+    playerData.video_id = 'video-b';
+    playerData.title = 'Native B';
+    api.setDeArrowCache('video-b', {});
+    api.processDeArrowWatchPage();
+    assert.equal(title.textContent, 'Native B');
+
+    // B finishes; an end-screen click to video C (also without a community
+    // title) reuses the unhydrated heading again. No replacement markers are
+    // left after the repair, so staleness must be detected from our own last
+    // write or B's title persists under video C forever.
+    api.setPath('/watch?v=video-c');
+    flexyData.videoId = 'video-c';
+    playerData.video_id = 'video-c';
+    playerData.title = 'Native C';
+    api.setDeArrowCache('video-c', {});
+    api.processDeArrowWatchPage();
+    assert.equal(title.textContent, 'Native C',
+        'a repaired heading reused by a later navigation must be released');
+
+    // A later hop with a community title must release the repaired text first
+    // so the recorded original belongs to the new video.
+    api.setPath('/watch?v=video-d');
+    flexyData.videoId = 'video-d';
+    playerData.video_id = 'video-d';
+    playerData.title = 'Native D';
+    api.setDeArrowCache('video-d', { title: 'Community D' });
+    api.processDeArrowWatchPage();
+    assert.equal(title.textContent, 'Community D');
+    assert.equal(title.dataset.ytbDeOriginalTitle, 'Native D');
+    assert.equal(title.dataset.ytbDeOriginalTitleVideo, 'video-d');
+});
+
+class FakeHeadingText {
+    constructor(text) {
+        this.nodeType = 3;
+        this.text = text;
+    }
+    get textContent() { return this.text; }
+}
+
+class FakeHeading extends FakeDecoratedText {
+    constructor(text) {
+        super('');
+        this.childNodes = [new FakeHeadingText(text)];
+    }
+    get textContent() {
+        return this.childNodes.map(node => node.textContent).join('');
+    }
+    set textContent(value) {
+        this.childNodes = [new FakeHeadingText(String(value))];
+    }
+    removeChild(node) {
+        this.childNodes = this.childNodes.filter(item => item !== node);
+    }
+}
+
+test('watch-page DeArrow removes its stale text node when YouTube appends the new title', () => {
+    const title = new FakeHeading('Native A');
+    const playerData = { video_id: 'video-a', title: 'Native A' };
+    const flexyData = { videoId: 'video-a' };
+    const api = loadContentHarness(
+        new Set(), { watchTitle: title, playerData, flexyData }
+    );
+
+    api.configure({ settings: { enabled: true, deArrowTitles: true } });
+    api.setPath('/watch?v=video-a');
+    api.setDeArrowCache('video-a', { title: 'Community A' });
+    api.processDeArrowWatchPage();
+    assert.equal(title.textContent, 'Community A');
+
+    // YouTube hydrates the next video by appending its own text node beside
+    // the foreign node the extension wrote, so both titles render at once.
+    title.childNodes.push(new FakeHeadingText('Native B'));
+    api.setPath('/watch?v=video-b');
+    flexyData.videoId = 'video-b';
+    playerData.video_id = 'video-b';
+    playerData.title = 'Native B';
+    api.setDeArrowCache('video-b', {});
+    api.processDeArrowWatchPage();
+    assert.equal(title.textContent, 'Native B',
+        'the stale community text node must be pruned, keeping YouTube\'s node');
+    assert.equal(title.dataset.ytbDeTitle, undefined);
+    assert.equal(title.dataset.ytbDeWatchWritten, undefined);
+
+    // A later video with a community title still applies over the pruned node.
+    api.setDeArrowCache('video-b', { title: 'Community B' });
+    api.refreshDeArrowWatchTitle();
+    assert.equal(title.textContent, 'Community B');
+    assert.equal(title.dataset.ytbDeOriginalTitle, 'Native B');
+});
+
+test('watch-page DeArrow trusts native hydration over its own last repair', () => {
+    const title = new FakeDecoratedText('Native A');
+    const playerData = { video_id: 'video-a', title: 'Native A' };
+    const flexyData = { videoId: 'video-a' };
+    const api = loadContentHarness(
+        new Set(), { watchTitle: title, playerData, flexyData }
+    );
+
+    api.configure({ settings: { enabled: true, deArrowTitles: true } });
+    api.setPath('/watch?v=video-a');
+    api.setDeArrowCache('video-a', { title: 'Community A' });
+    api.processDeArrowWatchPage();
+
+    api.setPath('/watch?v=video-b');
+    flexyData.videoId = 'video-b';
+    playerData.video_id = 'video-b';
+    playerData.title = 'Native B';
+    api.setDeArrowCache('video-b', {});
+    api.processDeArrowWatchPage();
+    assert.equal(title.textContent, 'Native B');
+
+    // YouTube hydrates the heading itself on the next navigation before our
+    // pass runs. The hydrated text wins even when player data differs.
+    api.setPath('/watch?v=video-c');
+    flexyData.videoId = 'video-c';
+    playerData.video_id = 'video-c';
+    playerData.title = 'Native C (player)';
+    title.textContent = 'Native C';
+    api.setDeArrowCache('video-c', {});
+    api.processDeArrowWatchPage();
+    assert.equal(title.textContent, 'Native C',
+        'a natively hydrated heading must never be overwritten by the repair');
+});
+
 test('watch-page DeArrow preserves early native hydration during navigation', () => {
     const title = new FakeDecoratedText('Native A');
     const flexyData = { videoId: 'video-a' };
@@ -871,4 +1025,68 @@ test('watch-page DeArrow preserves early native hydration during navigation', ()
     assert.ok(api.postedMessages.some(item =>
         item.message.type === 'ytb-get-video-data' && item.message.vid === 'video-b'
     ));
+});
+
+test('paid and free badge labels are recognised across YouTube UI languages', () => {
+    const api = loadContentHarness(new Set());
+
+    const paidBadges = [
+        'Pay to watch', 'Buy or rent',      // en
+        // de wording verified live on the storefront, 2026-07
+        'Kaufen oder leihen', 'Kaufen oder ausleihen', 'Kostenpflichtig',
+        'Comprar o alquilar', 'De pago',    // es
+        'Acheter ou louer', 'Payant',       // fr
+        'Noleggia o acquista',              // it
+        'A pagamento',                      // it
+        'Alugar ou comprar',                // pt
+        'Huren of kopen', 'Betaald',        // nl
+        'Kup lub wypożycz', 'Płatne',       // pl
+        'Купить или взять напрокат',        // ru
+        'Платно',                           // ru
+        'Satın al veya kirala', 'Ücretli',  // tr
+        '購入またはレンタル', 'レンタル',      // ja
+        '有料',                              // ja
+        '구매 또는 대여', '유료',              // ko
+        '购买或租借', '購買或租借', '付費',     // zh
+        'شراء أو استئجار', 'مدفوع'          // ar
+    ];
+    const freeBadges = [
+        'Free with ads',                    // en
+        'Kostenlos mit Werbung',            // de (verified live 2026-07)
+        'Gratis con anuncios',              // es
+        'Gratuit avec des annonces',        // fr
+        'Gratis con annunci',               // it
+        'Grátis com anúncios',              // pt
+        'Za darmo z reklamami',             // pl
+        'Bezpłatne z reklamami',            // pl (contains the "płatn" stem)
+        'Бесплатно с рекламой',             // ru (contains the "платн" stem)
+        'Reklamlarla ücretsiz',             // tr
+        '広告付きで無料',                     // ja
+        '광고 포함 무료',                     // ko
+        '含广告免费', '免費（含廣告）'          // zh
+    ];
+    for (const label of paidBadges) {
+        assert.equal(api.isPaidBadgeText(label), true, 'paid: ' + label);
+    }
+    for (const label of freeBadges) {
+        assert.equal(api.isPaidBadgeText(label), false, 'free: ' + label);
+    }
+});
+
+test('a localized paid badge hides the tile and a localized free badge does not', () => {
+    const api = loadContentHarness(new Set());
+    api.configure({
+        settings: { enabled: true, hidePaidVideos: true, reduceFlashing: true }
+    });
+
+    const cards = [
+        new FakeTile('paidjp000001', { isPaid: true, paidText: '購入またはレンタル' }),
+        new FakeTile('freejp000001', { isPaid: true, paidText: '広告付きで無料' }),
+        new FakeTile('plain0000001')
+    ];
+    api.filterMutatedTiles([childListRecord(new FakeRoot(cards))]);
+
+    assert.equal(cards[0].dataset.ytbFilterReason, 'paid');
+    assert.equal(cards[1].dataset.ytbFilterReason, undefined);
+    assert.equal(cards[2].dataset.ytbFilterReason, undefined);
 });

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>YouTube/Twitch Enhancer — Twitch settings</title>
     <link rel="stylesheet" href="ui.css">
+    <link rel="stylesheet" href="settings-enhancements.css">
     <style>
         :root { --accent: #9147ff; --accent-2: #bf94ff; }
         body { max-width: 720px; margin: 0 auto; }
@@ -21,7 +22,7 @@
         .chip button { border: none; background: transparent; color: var(--accent-2);
             padding: 0 4px; font-size: 13px; cursor: pointer; }
         .footer { display: flex; justify-content: space-between; align-items: center;
-            padding: 12px 16px; color: var(--muted); font-size: 11px; }
+            padding: 12px 16px; color: var(--muted); font-size: 12px; }
         button.primary:hover { background: #a970ff; }
         .pill .n { color: var(--accent-2); }
     </style>
@@ -42,10 +43,10 @@
     <div class="section">
         <h2>Block a channel</h2>
         <div class="row">
-            <input type="text" id="ch-input" class="grow" placeholder="channel name or https://www.twitch.tv/channel">
+            <input type="text" id="ch-input" aria-label="Twitch channel to block" class="grow" placeholder="channel name or https://www.twitch.tv/channel">
             <button class="primary" id="ch-btn">Block channel</button>
         </div>
-        <div class="muted" style="margin-top:8px;font-size:11px;">
+        <div class="muted" style="margin-top:8px;font-size:12px;">
             Tip: on twitch.tv you can right-click any stream card and choose <b>Block this Twitch channel</b>.
         </div>
     </div>
@@ -53,10 +54,10 @@
     <div class="section">
         <h2>Block a category</h2>
         <div class="row">
-            <input type="text" id="cat-input" class="grow" placeholder='Category name (e.g. "Pools, Hot Tubs, and Beaches") or its directory URL'>
+            <input type="text" id="cat-input" aria-label="Twitch category to block" class="grow" placeholder='Category name (e.g. "Pools, Hot Tubs, and Beaches") or its directory URL'>
             <button class="primary" id="cat-btn">Block category</button>
         </div>
-        <div class="muted" style="margin-top:8px;font-size:11px;">
+        <div class="muted" style="margin-top:8px;font-size:12px;">
             Blocking a category hides every stream in it — usually far more effective than blocking channels one by one.
         </div>
     </div>
@@ -64,7 +65,7 @@
     <div class="section">
         <h2>Blocked title keywords</h2>
         <div class="row">
-            <input type="text" id="kw-input" class="grow" placeholder='Hide streams whose title contains… (or /regex/ for patterns)'>
+            <input type="text" id="kw-input" aria-label="Blocked Twitch title keyword" class="grow" placeholder='Hide streams whose title contains… (or /regex/ for patterns)'>
             <button class="primary" id="kw-btn">Add</button>
         </div>
         <div class="chips" id="kw-list"></div>
@@ -73,7 +74,7 @@
     <div class="section">
         <h2>Blocked tags</h2>
         <div class="row">
-            <input type="text" id="tag-input" class="grow" placeholder='Tag name exactly as shown on stream cards (e.g. "Drops Enabled")'>
+            <input type="text" id="tag-input" aria-label="Blocked Twitch tag" class="grow" placeholder='Tag name exactly as shown on stream cards (e.g. "Drops Enabled")'>
             <button class="primary" id="tag-btn">Add</button>
         </div>
         <div class="chips" id="tag-list"></div>
@@ -85,8 +86,9 @@
 
     <div class="section">
         <h2>Block lists</h2>
-        <div class="row">
-            <input type="text" id="filter-input" class="grow" placeholder="Search blocked channels / categories…">
+        <div class="row" style="flex-wrap:wrap;">
+            <input type="text" id="filter-input" class="grow" aria-label="Search managed lists" placeholder="Search blocked channels / categories…">
+            <label>Sort <select id="list-sort" aria-label="Sort managed lists"><option value="name">Name</option><option value="newest">Newest added</option><option value="oldest">Oldest added</option></select></label>
             <button id="rm-selected-btn" class="danger" title="Remove everything ticked below">Remove selected</button>
         </div>
     </div>
@@ -121,7 +123,7 @@
         </label>
         <label class="toggle">
             <input type="checkbox" id="set-emotes">
-            <span class="t-text">Third-party emotes<small>Renders BetterTTV, FrankerFaceZ and 7TV emotes in chat (global + this channel's). Privacy note: emote lists are fetched from those three services, which see the channel you're watching.</small></span>
+            <span class="t-text">Third-party emotes <span class="network-badge">Network</span><small>Renders BetterTTV, FrankerFaceZ and 7TV emotes in chat (global + this channel's). Privacy note: emote lists are fetched from those three services, which see the channel you're watching.</small></span>
         </label>
         <label class="toggle">
             <input type="checkbox" id="set-clipdl">
@@ -175,21 +177,21 @@
 
     <div class="section">
         <h2>Chat filters</h2>
-        <div class="muted" style="margin-bottom:10px;font-size:11px;">
+        <div class="muted" style="margin-bottom:10px;font-size:12px;">
             Same syntax as the block keywords: plain words/phrases or <b>/regex/</b> patterns.
         </div>
         <div class="row">
-            <input type="text" id="hl-input" class="grow" placeholder='Highlight messages containing… (tinted background)'>
+            <input type="text" id="hl-input" aria-label="Highlighted Twitch chat keyword" class="grow" placeholder='Highlight messages containing… (tinted background)'>
             <button class="primary" id="hl-btn">Add</button>
         </div>
         <div class="chips" id="hl-list"></div>
         <div class="row" style="margin-top:14px;">
-            <input type="text" id="cbw-input" class="grow" placeholder='Hide messages containing…'>
+            <input type="text" id="cbw-input" aria-label="Blocked Twitch chat keyword" class="grow" placeholder='Hide messages containing…'>
             <button class="primary" id="cbw-btn">Add</button>
         </div>
         <div class="chips" id="cbw-list"></div>
         <div class="row" style="margin-top:14px;">
-            <input type="text" id="cbu-input" class="grow" placeholder='Hide messages from user… (login name)'>
+            <input type="text" id="cbu-input" aria-label="Blocked Twitch chat user" class="grow" placeholder='Hide messages from user… (login name)'>
             <button class="primary" id="cbu-btn">Add</button>
         </div>
         <div class="chips" id="cbu-list"></div>
@@ -209,22 +211,22 @@
 
     <div class="section">
         <h2>Chat performance</h2>
-        <div class="muted" style="margin-bottom:10px;font-size:11px;">
+        <div class="muted" style="margin-bottom:10px;font-size:12px;">
             For busy chats. Each slider's leftmost position (0) leaves Twitch's default behaviour untouched.
         </div>
         <div class="row">
             <span class="grow">Line limit<br><small class="muted">Maximum chat lines kept on screen</small></span>
-            <input type="range" id="set-linelimit" min="0" max="500" step="25" style="width:160px;">
+            <input type="range" id="set-linelimit" aria-label="Maximum Twitch chat lines" min="0" max="500" step="25" style="width:160px;">
             <span class="pill" style="min-width:64px;text-align:center;"><span class="n" id="linelimit-val">off</span></span>
         </div>
         <div class="row">
             <span class="grow">Message batching<br><small class="muted">Reveal new messages together every N ms</small></span>
-            <input type="range" id="set-batchms" min="0" max="1000" step="50" style="width:160px;">
+            <input type="range" id="set-batchms" aria-label="Twitch chat batch interval" min="0" max="1000" step="50" style="width:160px;">
             <span class="pill" style="min-width:64px;text-align:center;"><span class="n" id="batchms-val">off</span></span>
         </div>
         <div class="row">
             <span class="grow">Smooth scroll<br><small class="muted">Slide new messages into view over N ms</small></span>
-            <input type="range" id="set-smoothms" min="0" max="500" step="25" style="width:160px;">
+            <input type="range" id="set-smoothms" aria-label="Twitch chat smooth scroll duration" min="0" max="500" step="25" style="width:160px;">
             <span class="pill" style="min-width:64px;text-align:center;"><span class="n" id="smoothms-val">off</span></span>
         </div>
     </div>
@@ -238,8 +240,8 @@
             <button id="clear-btn" class="danger">🗑 Clear Twitch lists</button>
         </div>
         <input type="file" id="import-file" class="hidden-input" accept="application/json,.json">
-        <div class="status" id="status"></div>
-        <div class="muted" style="margin-top:10px;font-size:11px;">
+        <div class="status" id="status" role="status" aria-live="polite"></div>
+        <div class="muted" style="margin-top:10px;font-size:12px;">
             Exports contain both the YouTube and Twitch lists in one file. Import merges (no duplicates).
             "Clear" only empties the Twitch lists — YouTube data is untouched.
         </div>
@@ -250,7 +252,9 @@
         <a class="kofi" href="https://ko-fi.com/carcer7378" target="_blank" rel="noopener"><span class="heart">♥</span> Support development on Ko-fi</a>
     </div>
 
+    <script src="feature-core.js"></script>
     <script src="common.js"></script>
     <script src="twitch-options.js"></script>
+    <script src="settings-enhancements.js"></script>
 </body>
 </html>

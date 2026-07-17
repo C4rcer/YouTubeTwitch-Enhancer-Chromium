@@ -1,6 +1,53 @@
 # Changelog
 
-## 4.8.1 — 2026-07-15
+Chromium releases now use the same version numbers as the Firefox
+extension for the same feature set. The two entries below originally
+shipped from this repo as "4.8.0" and "4.8.1"; they correspond to
+Firefox 4.7.1 and 4.7.2 and have been renumbered to match (nothing was
+ever published to the Chrome Web Store under the old numbers).
+
+## Unreleased
+
+Parity with the Firefox repo's unreleased language-coverage fixes.
+
+### Fixed
+
+- Paid / rental badge hiding now recognises Japanese, Korean, Chinese, Russian, Turkish, Polish, and Arabic labels, and keeps localized "free with ads" badges visible, matching the members-only badge's language coverage. It also matches each language's bare "paid" badge ("Kostenpflichtig", 有料, and similar), which appears alongside the buy/rent wording; the German strings were verified against the live storefront.
+- The desktop guide's Shorts entry is now also matched by its language-independent /shorts link, and the Japanese channel tab (ショート) is hidden like its English counterpart.
+- The workspace's "Show transcript" lookup now matches localized button labels (Transkript, transcription, 文字起こし, and similar) instead of only the English wording.
+
+## 4.8.0 — 2026-07-16
+
+Port of the Firefox 4.8.0 release.
+
+### Added
+
+- Configurable keyboard, auxiliary-mouse, and player-wheel actions shared by YouTube and Twitch, retaining `[`, `]`, and `\` as defaults.
+- Named playback profiles with channel rules, quality/caption/compressor preferences, active-profile feedback, and graceful native-quality fallback. On Chromium the profile quality selection runs in the MAIN-world page-quality.js helper (new `ytb-profile-quality` bridge message), since the isolated world cannot reach YouTube's player API.
+- A rendered-transcript/chapter workspace and local YouTube subscription collections with JSON/CSV transfer and quota-bounded optional Sync.
+- Bounded Twitch player recovery, live-edge/delay controls, configurable seeking, local sidebar favourites/groups/search, and a reversible theater/fullscreen chat overlay.
+- Collapsible Twitch sidebar groups: a manager toggle tucks a group's non-favourite members out of the default sidebar view, while search and the group's own view still reveal them.
+- The browser-sync status line now appears with the sync control on both settings pages instead of YouTube only.
+- Progressive shared settings navigation, search, Basic/Advanced views, persisted collapsible sections, themes, presets, privacy disclosure, redacted diagnostics, recent actions/undo, selective import merge/replace, and automatic pre-reset backups.
+- Sorted 500-row manager paging, hidden-video metadata for new entries, and accessibility improvements for popup tabs, labels, focus, forced colours, reduced motion, and helper text.
+
+### Changed
+
+- Twitch card work now uses cached dirty-subtree processing with bounded hydration recovery instead of mutation-triggered or periodic full-page article scans.
+- Twitch selectors prefer stable data attributes, URLs, roles, and media state; documented text fallbacks fail closed.
+- Shared storage normalization, JSON backup/merge, and browser-sync payloads now preserve the new bounded local models (`ytCollections`, `twitchSidebar`) with quota caps, without adding a host permission or custom backend.
+
+### Fixed
+
+- Release a reused watch heading whose text was last written by the extension for a previous video, so the old video's title can no longer persist under the next video after an end-screen or suggested-video navigation. The native-title repair now records its own write, letting later passes distinguish an unhydrated reused heading from a genuine hydration even when neither video has a DeArrow replacement.
+- Remove the extension's own stale heading text node when YouTube's SPA hydration appends the new video's title beside it instead of replacing it, which rendered the previous and current titles together under the player.
+- Keep the Twitch sidebar group manager's rename and collapse controls working after a save: handlers now resolve the group by ID at event time and the open manager re-renders on storage updates, so the asynchronous storage echo can no longer orphan the objects behind an open panel's rows.
+
+### Validation
+
+- Ported the dependency-free suites for the shared schema/runtime, YouTube workspace, Twitch experience, settings helpers, and static UI accessibility, plus the regressions for watch-heading reuse, appended-duplicate heading pruning, the chat overlay move/restore lifecycle, chat-batch mutation bounds, and collapsed sidebar groups. The Chromium suite passes 87/87 (the Firefox 85 plus the two Chromium MAIN-world bridge regressions).
+
+## 4.7.2 — 2026-07-15
 
 ### Fixed
 
@@ -12,7 +59,7 @@
 
 - Add two watch-page SPA regressions; the dependency-free suite now contains 37 tests.
 
-## 4.8.0 — 2026-07-14
+## 4.7.1 — 2026-07-14
 
 ### Fixed
 

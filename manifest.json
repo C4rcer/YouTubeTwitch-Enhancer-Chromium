@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube/Twitch Enhancer",
-  "version": "4.8.1",
+  "version": "4.8.0",
   "description": "Enhance YouTube & Twitch: block channels, categories, tags & keywords; hide Shorts/watched videos; add player, chat & claim tools.",
 
   "minimum_chrome_version": "111",
@@ -33,8 +33,8 @@
   "content_scripts": [
     {
       "matches": ["https://www.youtube.com/*"],
-      "js": ["src/watched-db.js", "src/content.js"],
-      "css": ["src/content.css"],
+      "js": ["src/feature-core.js", "src/watched-db.js", "src/player-controls.js", "src/content.js", "src/youtube-workspace.js"],
+      "css": ["src/content.css", "src/player-controls.css", "src/youtube-workspace.css"],
       "run_at": "document_start",
       "all_frames": false
     },
@@ -47,8 +47,8 @@
     },
     {
       "matches": ["https://www.twitch.tv/*", "https://clips.twitch.tv/*"],
-      "js": ["src/twitch.js"],
-      "css": ["src/twitch.css"],
+      "js": ["src/feature-core.js", "src/player-controls.js", "src/twitch-experience.js", "src/twitch.js"],
+      "css": ["src/twitch.css", "src/player-controls.css", "src/twitch-experience.css"],
       "run_at": "document_start",
       "all_frames": false
     },

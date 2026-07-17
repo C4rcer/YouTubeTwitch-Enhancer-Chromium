@@ -1,12 +1,13 @@
-# Chrome Web Store release sheet — 4.8.1
+# Chrome Web Store release sheet — 4.8.0
 
-This file contains the copy and dashboard answers for the Chromium 4.8.1
-upload. Upload the ZIP produced by `build.ps1`; do not upload this file or the
-`store-assets` directory as part of the extension package.
+This file contains the copy and dashboard answers for the Chromium 4.8.0
+upload (Chromium versions are now aligned with the Firefox extension; see
+CHANGELOG.md). Upload the ZIP produced by `build.ps1`; do not upload this file
+or the `store-assets` directory as part of the extension package.
 
 ## Package
 
-- File: `youtube-twitch-enhancer-chromium-4.8.1.zip`
+- File: `youtube-twitch-enhancer-chromium-4.8.0.zip`
 - Manifest: V3
 - Minimum Chrome version: 111
 - Category: Productivity
@@ -26,21 +27,32 @@ Filter unwanted channels, categories, tags, stream titles, video titles, and
 comments. Remove Shorts, watched videos, paid or members-only tiles, promos,
 Mixes, playlists, shelves, chat, and other clutter using granular controls.
 
-YouTube watched history is kept locally so videos stay hidden even after
-YouTube loses their progress. Mark videos watched from the right-click or
-three-dot menu, view per-channel Watched and Hidden counts, and export, import,
-or clear the watched database independently.
+Watched history is kept locally so videos stay hidden even when the site
+loses their progress. Mark videos watched from the right-click or three-dot
+menu, view per-channel Watched and Hidden counts, and export, import, or
+clear the watched database independently.
 
 Playback tools include maximum quality, speed controls and per-channel speed
 memory, volume boost, audio compression, screenshots, A-B looping, cinema
-mode, autoplay control, and idle-pause dismissal.
+mode, autoplay control, and idle-pause dismissal. Configurable keyboard,
+mouse-button, and scroll-wheel player actions plus named playback profiles
+with per-channel rules apply your preferred speed, quality, captions, and
+compressor automatically on both sites.
 
-Twitch tools include channel/category/tag filtering, points/drops/Moments
-claiming, third-party emotes, chat filters and performance controls, optional
-anonymous read-only chat, clip sharing/downloads, source quality, uptime,
-sidebar previews, and matching player tools. Claim automation, clip tools,
-source quality, and sidebar previews start enabled and can be turned off;
-third-party emotes and anonymous chat start off.
+A transcript and chapter workspace renders searchable transcripts locally,
+and local subscription collections organize channels into filterable groups
+with JSON/CSV import and export. On the streaming side, local sidebar
+favourites, collapsible groups and search, live-edge and stream-delay
+controls, bounded player recovery, and a theater/fullscreen chat overlay
+round out the toolkit.
+
+Streaming tools also include channel/category/tag filtering,
+points/drops/Moments claiming, third-party emotes, chat filters and
+performance controls, optional anonymous read-only chat, clip
+sharing/downloads, source quality, uptime, sidebar previews, and matching
+player tools. Claim automation, clip tools, source quality, and sidebar
+previews start enabled and can be turned off; third-party emotes and
+anonymous chat start off.
 
 SponsorBlock, DeArrow, Return YouTube Dislike, third-party emotes, and browser
 sync are separately controlled. Community integrations are opt-in and all
@@ -52,14 +64,19 @@ This independent extension is not affiliated with or endorsed by YouTube,
 Google, Twitch, Amazon, SponsorBlock, DeArrow, Return YouTube Dislike,
 BetterTTV, FrankerFaceZ, or 7TV.
 
-## What's new in 4.8.1
+## What's new in 4.8.0
 
-- Fixed DeArrow watch-page titles retaining or reapplying the previous video's
-  title after YouTube single-page navigation.
-- Cross-checks now reconcile the route, watch container, and player identity,
-  and recover the verified native title when YouTube reuses an old heading.
-- Added two watch-page navigation regressions, bringing the dependency-free
-  suite to 37 tests.
+- Configurable keyboard, mouse-button, and scroll-wheel player actions plus
+  named playback profiles with per-channel rules on both supported sites.
+- Transcript/chapter workspace and local subscription collections with
+  JSON/CSV transfer.
+- Stream sidebar favourites, collapsible groups and search, live-edge and
+  delay controls, bounded player recovery, and a theater/fullscreen chat
+  overlay.
+- Redesigned settings with search, Basic/Advanced views, themes, presets,
+  privacy summary, selective import, pre-reset backups, and undo.
+- Fixed the previous video's title persisting under the player after
+  end-screen or suggested-video navigation.
 
 ## Single purpose
 
@@ -75,37 +92,36 @@ and the optional block-list mirror in browser sync.
 **unlimitedStorage**
 
 The user-controlled watched-history database can contain many video IDs. This
-permission prevents that local database from reaching Chrome's normal
+permission prevents that local database from reaching the browser's normal
 extension-storage quota or being evicted. It is not used for a remote cache.
 
 **contextMenus**
 
-Adds user-invoked commands to block a YouTube/Twitch channel or category, hide
-a video, mark a video watched, and open advanced settings.
+Adds user-invoked commands to block a channel or category, hide a video, mark
+a video watched, and open advanced settings.
 
 **Host access: www.youtube.com**
 
-Runs the YouTube content and MAIN-world player helper scripts so the extension
-can filter cards/comments, maintain local watched history, and add playback
-controls on YouTube only.
+Runs the content and MAIN-world player helper scripts on this site only, so
+the extension can filter cards/comments, maintain local watched history, and
+add playback controls.
 
 **Host access: www.twitch.tv and clips.twitch.tv**
 
-Runs the Twitch content script on `www.twitch.tv` and `clips.twitch.tv` for
-filtering, clip, emote, player, and claim tools. A MAIN-world helper runs only
-on `www.twitch.tv` to implement player/chat features that require Twitch page
-APIs.
+Runs the content script on these two hosts for filtering, clip, emote,
+player, and claim tools. A MAIN-world helper runs only on `www.twitch.tv` to
+implement player/chat features that require page APIs.
 
 **Host access: sponsor.ajay.app**
 
 Lets the separately controlled SponsorBlock and DeArrow features retrieve
-community segment/branding data and lets users submit or vote on SponsorBlock
-segments. Requests are limited to fixed SponsorBlock API endpoints.
+community segment/branding data and lets users submit or vote on segments.
+Requests are limited to fixed API endpoints on this host.
 
 **Host access: returnyoutubedislikeapi.com**
 
 Lets the separately controlled Return YouTube Dislike feature retrieve counts
-for the exact YouTube video currently being viewed.
+for the exact video currently being viewed.
 
 **Host access: api.betterttv.net, api.frankerfacez.com, and 7tv.io**
 
@@ -176,7 +192,9 @@ Other required/available graphics:
 1. Push the updated public `PRIVACY.md` before submitting so its URL resolves.
 2. Enable 2-Step Verification on the owning Google account.
 3. Open the existing item and choose **Upload new package**.
-4. Upload only `youtube-twitch-enhancer-chromium-4.8.1.zip`.
+4. Upload only `youtube-twitch-enhancer-chromium-4.8.0.zip` (built 2026-07-16
+   from this release; it replaced an older 2026-07-14 zip of the same name
+   that predated the version realignment).
 5. Paste the updated description, What's new text, single purpose, permission
    justifications, remote-code answer, and data-use disclosures above.
 6. Upload no more than five screenshots.

@@ -1,0 +1,416 @@
+/* Local Twitch player, sidebar and chat-overlay controls. */
+
+#ytbtw-player-experience {
+    position: absolute;
+    right: 12px;
+    bottom: 52px;
+    z-index: 65;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: calc(100% - 24px);
+    color: #efeff1;
+    font: 600 12px/1.2 "Inter", "Roobert", system-ui, sans-serif;
+}
+
+#ytbtw-player-experience > button,
+#ytbtw-player-experience > span {
+    min-height: 28px;
+    box-sizing: border-box;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 999px;
+    padding: 5px 10px;
+    background: rgba(14, 14, 16, 0.82);
+    color: #efeff1;
+    font: inherit;
+    white-space: nowrap;
+}
+
+#ytbtw-player-experience > button {
+    cursor: pointer;
+}
+
+#ytbtw-player-experience > button:hover,
+#ytbtw-player-experience > button:focus-visible,
+#ytbtw-player-experience > button[aria-pressed="true"] {
+    border-color: #bf94ff;
+    background: #772ce8;
+    outline: none;
+}
+
+#ytbtw-player-experience > button:disabled {
+    cursor: default;
+    opacity: 0.82;
+}
+
+#ytbtw-live-delay[data-state="live"] {
+    color: #adffbd;
+}
+
+#ytbtw-live-delay[data-state="behind"] {
+    color: #ffd37a;
+}
+
+#ytbtw-recovery-status:not(:disabled) {
+    color: #ffd37a;
+}
+
+#ytbtw-player-panel {
+    position: absolute;
+    right: 12px;
+    bottom: 90px;
+    z-index: 70;
+    width: min(340px, calc(100vw - 28px));
+    max-height: min(520px, calc(100vh - 130px));
+    overflow: auto;
+    box-sizing: border-box;
+    padding: 14px;
+    border: 1px solid #53535f;
+    border-radius: 10px;
+    background: #18181b;
+    color: #efeff1;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.58);
+    font: 500 13px/1.35 "Inter", "Roobert", system-ui, sans-serif;
+}
+
+#ytbtw-player-panel[hidden] {
+    display: none !important;
+}
+
+#ytbtw-player-panel > strong {
+    display: block;
+    margin: 8px 0 6px;
+    color: #bf94ff;
+    font-size: 13px;
+}
+
+#ytbtw-player-panel > strong:first-child {
+    margin-top: 0;
+}
+
+#ytbtw-player-panel .ytbtw-field,
+#ytbtw-player-panel .ytbtw-check {
+    display: grid;
+    grid-template-columns: minmax(105px, 1fr) minmax(90px, 1.25fr) auto;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    margin: 4px 0;
+}
+
+#ytbtw-player-panel .ytbtw-check {
+    display: flex;
+}
+
+#ytbtw-player-panel input,
+#ytbtw-player-panel select,
+#ytbtw-player-panel button {
+    border: 1px solid #53535f;
+    border-radius: 6px;
+    background: #0e0e10;
+    color: #efeff1;
+    padding: 5px 7px;
+    font: inherit;
+}
+
+#ytbtw-player-panel input[type="range"] {
+    min-width: 100px;
+    padding: 0;
+    accent-color: #9147ff;
+}
+
+#ytbtw-player-panel input:focus-visible,
+#ytbtw-player-panel select:focus-visible,
+#ytbtw-player-panel button:focus-visible {
+    border-color: #bf94ff;
+    outline: 2px solid #bf94ff;
+    outline-offset: 1px;
+}
+
+#ytbtw-player-panel .ytbtw-panel-close {
+    width: 100%;
+    margin-top: 10px;
+    cursor: pointer;
+}
+
+#ytbtw-sidebar-tools {
+    position: sticky;
+    order: -2000;
+    top: 0;
+    z-index: 4;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 5px;
+    padding: 7px 6px;
+    background: #18181b;
+    border-bottom: 1px solid #303036;
+    color: #efeff1;
+}
+
+#ytbtw-sidebar-tools input,
+#ytbtw-sidebar-tools select,
+#ytbtw-sidebar-tools button {
+    min-width: 0;
+    box-sizing: border-box;
+    border: 1px solid #53535f;
+    border-radius: 6px;
+    background: #0e0e10;
+    color: #efeff1;
+    padding: 5px 7px;
+    font: 500 12px/1.25 "Inter", "Roobert", system-ui, sans-serif;
+}
+
+#ytbtw-sidebar-tools input {
+    grid-column: 1 / -1;
+}
+
+#ytbtw-sidebar-tools input:focus-visible,
+#ytbtw-sidebar-tools select:focus-visible,
+#ytbtw-sidebar-tools button:focus-visible,
+.ytbtw-sidebar-actions button:focus-visible {
+    border-color: #bf94ff;
+    outline: 2px solid #bf94ff;
+    outline-offset: 1px;
+}
+
+.ytbtw-sidebar-filtered {
+    display: none !important;
+}
+
+.ytbtw-sidebar-pinned {
+    order: var(--ytbtw-sidebar-order, -1) !important;
+}
+
+.ytbtw-sidebar-action-host {
+    position: relative !important;
+}
+
+.ytbtw-sidebar-actions {
+    position: absolute;
+    top: 50%;
+    right: 5px;
+    z-index: 3;
+    display: inline-flex;
+    gap: 2px;
+    transform: translateY(-50%);
+    opacity: 0;
+    transition: opacity 0.12s ease;
+}
+
+.ytbtw-sidebar-action-host:hover > .ytbtw-sidebar-actions,
+.ytbtw-sidebar-actions:focus-within {
+    opacity: 1;
+}
+
+.ytbtw-sidebar-actions button {
+    width: 24px;
+    height: 24px;
+    border: 1px solid #53535f;
+    border-radius: 5px;
+    padding: 0;
+    background: rgba(14, 14, 16, 0.94);
+    color: #efeff1;
+    font: 700 14px/1 system-ui, sans-serif;
+    cursor: pointer;
+}
+
+.ytbtw-sidebar-actions button[aria-pressed="true"] {
+    color: #ffd37a;
+}
+
+#ytbtw-sidebar-manager {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    z-index: 2147483646;
+    width: min(520px, calc(100vw - 30px));
+    max-height: min(680px, calc(100vh - 30px));
+    overflow: auto;
+    box-sizing: border-box;
+    transform: translate(-50%, -50%);
+    padding: 16px;
+    border: 1px solid #53535f;
+    border-radius: 12px;
+    background: #18181b;
+    color: #efeff1;
+    box-shadow: 0 18px 70px rgba(0, 0, 0, 0.75);
+    font: 500 13px/1.35 "Inter", "Roobert", system-ui, sans-serif;
+}
+
+#ytbtw-sidebar-manager button,
+#ytbtw-sidebar-manager input {
+    box-sizing: border-box;
+    border: 1px solid #53535f;
+    border-radius: 6px;
+    background: #0e0e10;
+    color: #efeff1;
+    padding: 6px 8px;
+    font: inherit;
+}
+
+#ytbtw-sidebar-manager button {
+    cursor: pointer;
+}
+
+#ytbtw-sidebar-manager button:focus-visible,
+#ytbtw-sidebar-manager input:focus-visible {
+    border-color: #bf94ff;
+    outline: 2px solid #bf94ff;
+    outline-offset: 1px;
+}
+
+.ytbtw-manager-head,
+.ytbtw-manager-create,
+.ytbtw-manager-row,
+.ytbtw-manager-io {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 10px;
+}
+
+.ytbtw-manager-head {
+    justify-content: space-between;
+    color: #bf94ff;
+    font-size: 15px;
+}
+
+.ytbtw-manager-create input,
+.ytbtw-manager-row input[type="text"] {
+    min-width: 0;
+    flex: 1;
+}
+
+.ytbtw-manager-row {
+    padding: 7px;
+    border-radius: 7px;
+    background: #242429;
+}
+
+.ytbtw-manager-io {
+    margin: 12px 0 0;
+}
+
+.ytbtw-sr-only {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0, 0, 0, 0) !important;
+    white-space: nowrap !important;
+    border: 0 !important;
+}
+
+#ytbtw-chat-overlay {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 55;
+    width: min(var(--ytbtw-overlay-width, 360px), 70%);
+    overflow: hidden;
+    opacity: var(--ytbtw-overlay-opacity, 0.86);
+    background: rgba(14, 14, 16, 0.96);
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.58);
+    transition: opacity 0.18s ease, transform 0.18s ease;
+    font-size: calc(1em * var(--ytbtw-overlay-font-scale, 1));
+}
+
+#ytbtw-chat-overlay[data-placement="right"] {
+    right: 0;
+}
+
+#ytbtw-chat-overlay[data-placement="left"] {
+    left: 0;
+}
+
+#ytbtw-chat-overlay[data-placement="bottom"] {
+    left: 0;
+    right: 0;
+    top: auto;
+    width: 100%;
+    height: min(46%, var(--ytbtw-overlay-width, 360px));
+}
+
+#ytbtw-chat-overlay.ytbtw-overlay-click-through {
+    pointer-events: none;
+}
+
+#ytbtw-chat-overlay.ytbtw-overlay-hidden {
+    opacity: 0;
+}
+
+#ytbtw-chat-overlay[data-placement="right"].ytbtw-overlay-hidden {
+    transform: translateX(96%);
+}
+
+#ytbtw-chat-overlay[data-placement="left"].ytbtw-overlay-hidden {
+    transform: translateX(-96%);
+}
+
+#ytbtw-chat-overlay[data-placement="bottom"].ytbtw-overlay-hidden {
+    transform: translateY(96%);
+}
+
+#ytbtw-chat-overlay .ytbtw-overlay-chat-node {
+    width: 100% !important;
+    height: 100% !important;
+    max-width: none !important;
+    background: transparent !important;
+}
+
+#ytbtw-chat-overlay > .channel-root__right-column {
+    display: flex !important;
+    position: relative !important;
+}
+
+#ytbtw-chat-overlay.ytbtw-overlay-passive [data-a-target="chat-input"],
+#ytbtw-chat-overlay.ytbtw-overlay-passive [data-a-target="chat-send-button"],
+#ytbtw-chat-overlay.ytbtw-overlay-passive .chat-input {
+    display: none !important;
+}
+
+@media (max-width: 700px) {
+    #ytbtw-player-experience {
+        left: 8px;
+        right: 8px;
+        bottom: 45px;
+        overflow-x: auto;
+        justify-content: flex-end;
+    }
+
+    #ytbtw-player-experience > button,
+    #ytbtw-player-experience > span {
+        padding: 4px 7px;
+    }
+
+    #ytbtw-sidebar-manager {
+        padding: 11px;
+    }
+
+    .ytbtw-manager-row {
+        flex-wrap: wrap;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #ytbtw-chat-overlay,
+    .ytbtw-sidebar-actions {
+        transition: none !important;
+    }
+}
+
+@media (forced-colors: active) {
+    #ytbtw-player-experience > button,
+    #ytbtw-player-experience > span,
+    #ytbtw-player-panel,
+    #ytbtw-sidebar-tools,
+    #ytbtw-sidebar-manager,
+    #ytbtw-chat-overlay {
+        border: 1px solid CanvasText;
+        background: Canvas;
+        color: CanvasText;
+        forced-color-adjust: auto;
+    }
+}

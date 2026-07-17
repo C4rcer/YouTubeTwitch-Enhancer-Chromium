@@ -19,6 +19,7 @@
         ckwBtn: $('ckw-btn'),
         ckwList: $('ckw-list'),
         filterInput: $('filter-input'),
+listSort: $('list-sort'),
         rmSelectedBtn: $('rm-selected-btn'),
         chCount: $('ch-count'),
         vidCount: $('vid-count'),
@@ -92,7 +93,8 @@
     // script failed to load; the section then reports "unavailable".
     const WDB = window.YTBWatchedDB || null;
 
-    const MAX_ROWS = 500;   // cap list rendering; the search box narrows it
+    const PAGE_SIZE = 500;
+    const listPages = { channels: 0, videos: 0 };
 
     function status(msg, isErr) {
         els.status.textContent = msg;
@@ -100,9 +102,61 @@
         if (msg) setTimeout(() => { els.status.textContent = ''; els.status.classList.remove('err'); }, 4000);
     }
 
-    async function commit() {
+    function snapshotKeys(keys) {
+        const output = {};
+        for (const key of keys || []) output[key] = JSON.parse(JSON.stringify(data[key]));
+        return output;
+    }
+
+    async function commit(recent) {
+        if (recent && window.YTBFeatures && data.settings.recentActionsEnabled !== false) {
+            data.recentActions = window.YTBFeatures.addRecentAction(data.recentActions, {
+                id: 'action-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7),
+                type: 'list-removal', label: recent.label, before: recent.before,
+                after: snapshotKeys(recent.keys), expiresAt: Date.now() + 7 * 86400000
+            });
+        }
         data = await YTB.save(data);
         render();
+    }
+
+    function sortEntries(items, labelOf, addedAtOf) {
+        const mode = els.listSort ? els.listSort.value : 'name';
+        return items.slice().sort((a, b) => {
+            if (mode === 'newest' || mode === 'oldest') {
+                const delta = (Number(addedAtOf(a)) || 0) - (Number(addedAtOf(b)) || 0);
+                if (delta) return mode === 'newest' ? -delta : delta;
+            }
+            return labelOf(a).toLowerCase().localeCompare(labelOf(b).toLowerCase());
+        });
+    }
+
+    function pageEntries(items, kind) {
+        const lastPage = Math.max(0, Math.ceil(items.length / PAGE_SIZE) - 1);
+        listPages[kind] = Math.min(lastPage, Math.max(0, listPages[kind] || 0));
+        const start = listPages[kind] * PAGE_SIZE;
+        return items.slice(start, start + PAGE_SIZE);
+    }
+
+    function appendPager(container, kind, total, rerender) {
+        if (total <= PAGE_SIZE) return;
+        const pages = Math.ceil(total / PAGE_SIZE);
+        const nav = document.createElement('div');
+        nav.className = 'list-item row spread';
+        nav.setAttribute('role', 'navigation');
+        nav.setAttribute('aria-label', kind + ' pages');
+        const previous = document.createElement('button');
+        previous.textContent = 'Previous';
+        previous.disabled = listPages[kind] <= 0;
+        previous.addEventListener('click', () => { listPages[kind]--; rerender(); });
+        const label = document.createElement('span');
+        label.textContent = 'Page ' + (listPages[kind] + 1) + ' of ' + pages + ' · ' + total + ' matches';
+        const next = document.createElement('button');
+        next.textContent = 'Next';
+        next.disabled = listPages[kind] >= pages - 1;
+        next.addEventListener('click', () => { listPages[kind]++; rerender(); });
+        nav.append(previous, label, next);
+        container.appendChild(nav);
     }
 
     /* ---- rendering ---- */
@@ -250,6 +304,7 @@
         cb.type = 'checkbox';
         cb.className = 'sel';
         cb.title = 'Select for bulk removal';
+        cb.setAttribute('aria-label', 'Select ' + kind + ' for bulk removal');
         cb._ref = ref;
         cb._kind = kind;
         return cb;
@@ -258,17 +313,13 @@
     function renderChannels() {
         els.chCount.textContent = data.blockedChannels.length;
         els.channelList.textContent = '';
-        const sorted = data.blockedChannels.slice().sort(
-            (a, b) => YTB.channelLabel(a).toLowerCase().localeCompare(YTB.channelLabel(b).toLowerCase())
-        );
-        let shown = 0;
-        for (const c of sorted) {
+        const filtered = sortEntries(data.blockedChannels.filter(c => {
             const hay = [YTB.channelLabel(c), c.handle, c.channelId].filter(Boolean).join(' ');
-            if (!matchesFilter(hay)) continue;
-            if (++shown > MAX_ROWS) break;
+            return matchesFilter(hay);
+        }), YTB.channelLabel, c => c.addedAt);
+        for (const c of pageEntries(filtered, 'channels')) {
             const item = document.createElement('div');
             item.className = 'list-item';
-
             item.appendChild(selCheckbox(c, 'channel'));
 
             const grow = document.createElement('div');
@@ -288,6 +339,7 @@
             const rm = document.createElement('button');
             rm.className = 'icon danger';
             rm.title = 'Remove';
+            rm.setAttribute('aria-label', 'Remove blocked channel');
             rm.textContent = '✕';
             rm.addEventListener('click', () => removeChannel(c));
 
@@ -295,15 +347,14 @@
             item.appendChild(rm);
             els.channelList.appendChild(item);
         }
-        if (!shown) {
+        if (!filtered.length) {
             els.channelList.appendChild(emptyRow(
                 data.blockedChannels.length ? 'No matches for the search.' : 'No channels blocked yet.'
             ));
-        } else if (shown > MAX_ROWS) {
-            els.channelList.appendChild(emptyRow('Showing first ' + MAX_ROWS + ' — use the search box to narrow down.'));
+        } else {
+            appendPager(els.channelList, 'channels', filtered.length, renderChannels);
         }
     }
-
     function renderWhitelist() {
         if (!els.sbWlList) return;
         els.sbWlList.textContent = '';
@@ -335,6 +386,7 @@
             const rm = document.createElement('button');
             rm.className = 'icon danger';
             rm.title = 'Remove from whitelist';
+            rm.setAttribute('aria-label', rm.title);
             rm.textContent = '✕';
             rm.addEventListener('click', () => removeWhitelist(c));
 
@@ -347,13 +399,20 @@
     function renderVideos() {
         els.vidCount.textContent = data.hiddenVideoIds.length;
         els.videoList.textContent = '';
-        let shown = 0;
-        for (const id of data.hiddenVideoIds) {
-            if (!matchesFilter(id)) continue;
-            if (++shown > MAX_ROWS) break;
+        const filtered = sortEntries(data.hiddenVideoIds.filter(id => {
+            const details = data.hiddenVideoMetadata && data.hiddenVideoMetadata[id] || {};
+            return matchesFilter([id, details.title, details.channel].filter(Boolean).join(' '));
+        }), id => {
+            const details = data.hiddenVideoMetadata && data.hiddenVideoMetadata[id] || {};
+            return details.title || id;
+        }, id => {
+            const details = data.hiddenVideoMetadata && data.hiddenVideoMetadata[id] || {};
+            return details.addedAt;
+        });
+        for (const id of pageEntries(filtered, 'videos')) {
+            const details = data.hiddenVideoMetadata && data.hiddenVideoMetadata[id] || {};
             const item = document.createElement('div');
             item.className = 'list-item';
-
             item.appendChild(selCheckbox(id, 'video'));
 
             const grow = document.createElement('div');
@@ -363,12 +422,20 @@
             label.href = 'https://www.youtube.com/watch?v=' + id;
             label.target = '_blank';
             label.rel = 'noopener';
-            label.textContent = id;
+            label.textContent = details.title || id;
             grow.appendChild(label);
+            if (details.title || details.channel) {
+                const meta = document.createElement('div');
+                meta.className = 'meta';
+                const date = details.addedAt ? new Date(details.addedAt).toLocaleDateString() : '';
+                meta.textContent = [details.channel, id, date].filter(Boolean).join(' · ');
+                grow.appendChild(meta);
+            }
 
             const rm = document.createElement('button');
             rm.className = 'icon danger';
             rm.title = 'Unhide';
+            rm.setAttribute('aria-label', 'Unhide video');
             rm.textContent = '✕';
             rm.addEventListener('click', () => removeVideo(id));
 
@@ -376,15 +443,14 @@
             item.appendChild(rm);
             els.videoList.appendChild(item);
         }
-        if (!shown) {
+        if (!filtered.length) {
             els.videoList.appendChild(emptyRow(
                 data.hiddenVideoIds.length ? 'No matches for the search.' : 'No individually-hidden videos.'
             ));
-        } else if (shown > MAX_ROWS) {
-            els.videoList.appendChild(emptyRow('Showing first ' + MAX_ROWS + ' — use the search box to narrow down.'));
+        } else {
+            appendPager(els.videoList, 'videos', filtered.length, renderVideos);
         }
     }
-
     function renderChipList(listEl, arr, emptyText, onRemove) {
         listEl.textContent = '';
         if (!arr.length) {
@@ -398,6 +464,7 @@
             txt.textContent = k;
             const rm = document.createElement('button');
             rm.title = 'Remove keyword';
+            rm.setAttribute('aria-label', rm.title);
             rm.textContent = '✕';
             rm.addEventListener('click', () => onRemove(k));
             chip.appendChild(txt);
@@ -447,8 +514,9 @@
     }
 
     async function removeKeyword(k) {
+        const before = snapshotKeys(['blockedKeywords']);
         data.blockedKeywords = data.blockedKeywords.filter(x => x !== k);
-        await commit();
+        await commit({ label: 'Removed a YouTube title keyword', keys: ['blockedKeywords'], before });
         status('Removed keyword "' + k + '".');
     }
 
@@ -463,14 +531,16 @@
     }
 
     async function removeCommentKeyword(k) {
+        const before = snapshotKeys(['ytCommentKeywords']);
         data.ytCommentKeywords = data.ytCommentKeywords.filter(x => x !== k);
-        await commit();
+        await commit({ label: 'Removed a YouTube comment keyword', keys: ['ytCommentKeywords'], before });
         status('Removed comment keyword "' + k + '".');
     }
 
     async function removeChannel(c) {
+        const before = snapshotKeys(['blockedChannels']);
         data.blockedChannels = data.blockedChannels.filter(x => !YTB.sameChannel(x, c));
-        await commit();
+        await commit({ label: 'Removed a blocked YouTube channel', keys: ['blockedChannels'], before });
         status('Removed ' + YTB.channelLabel(c) + ' (reload YouTube to see its videos again).');
     }
 
@@ -487,25 +557,32 @@
     }
 
     async function removeWhitelist(c) {
+        const before = snapshotKeys(['sbWhitelist']);
         data.sbWhitelist = (data.sbWhitelist || []).filter(x => !YTB.sameChannel(x, c));
-        await commit();
+        await commit({ label: 'Removed a SponsorBlock whitelist channel', keys: ['sbWhitelist'], before });
         status('Removed ' + YTB.channelLabel(c) + ' from the SponsorBlock whitelist.');
     }
 
     async function removeVideo(id) {
+        const keys = ['hiddenVideoIds', 'hiddenVideoMetadata'];
+        const before = snapshotKeys(keys);
         data.hiddenVideoIds = data.hiddenVideoIds.filter(x => x !== id);
-        await commit();
+        if (data.hiddenVideoMetadata) delete data.hiddenVideoMetadata[id];
+        await commit({ label: 'Unhid a YouTube video', keys, before });
         status('Unhid ' + id + ' (reload YouTube to see it again).');
     }
 
     async function removeSelected() {
         const boxes = document.querySelectorAll('.list input.sel:checked');
         if (!boxes.length) { status('Tick some entries first.', true); return; }
+        const keys = ['blockedChannels', 'hiddenVideoIds', 'hiddenVideoMetadata'];
+        const before = snapshotKeys(keys);
         const channels = new Set(), videos = new Set();
         boxes.forEach(cb => (cb._kind === 'channel' ? channels : videos).add(cb._ref));
         data.blockedChannels = data.blockedChannels.filter(c => !channels.has(c));
         data.hiddenVideoIds = data.hiddenVideoIds.filter(id => !videos.has(id));
-        await commit();
+        if (data.hiddenVideoMetadata) videos.forEach(id => delete data.hiddenVideoMetadata[id]);
+        await commit({ label: 'Removed selected YouTube list entries', keys, before });
         status('Removed ' + channels.size + ' channels and ' + videos.size + ' videos.');
     }
 
@@ -595,12 +672,15 @@
 
     async function doClear() {
         if (!confirm('Remove ALL blocked channels, hidden videos and keywords? Settings are kept.')) return;
+        const keys = ['blockedChannels', 'hiddenVideoIds', 'hiddenVideoMetadata', 'blockedKeywords', 'ytCommentKeywords', 'sbWhitelist'];
+        const before = snapshotKeys(keys);
         data.blockedChannels = [];
         data.hiddenVideoIds = [];
+        data.hiddenVideoMetadata = {};
         data.blockedKeywords = [];
         data.ytCommentKeywords = [];
         data.sbWhitelist = [];
-        await commit();
+        await commit({ label: 'Cleared YouTube block lists', keys, before });
         status('Cleared the block list.');
     }
 
@@ -615,8 +695,13 @@
         els.sbWlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addWhitelist(); });
         els.filterInput.addEventListener('input', () => {
             filterText = els.filterInput.value.trim().toLowerCase();
+            listPages.channels = 0; listPages.videos = 0;
             renderChannels();
             renderVideos();
+        });
+        els.listSort.addEventListener('change', () => {
+            listPages.channels = 0; listPages.videos = 0;
+            renderChannels(); renderVideos();
         });
         els.rmSelectedBtn.addEventListener('click', removeSelected);
         [els.enabled, els.shorts, els.watched,
