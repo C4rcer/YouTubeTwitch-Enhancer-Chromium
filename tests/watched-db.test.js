@@ -254,6 +254,84 @@ test('a failed storage write remains dirty and succeeds on retry', async () => {
     assert.deepEqual(Array.from(harness.state[key].ids), ['retry000001']);
 });
 
+test('v6 load resets stale channel totals and pre-v5 attributions', async () => {
+    const channel = { handle: 'example' };
+    const ids = ['chanvid00001', 'othervid0001'];
+    const seed = {
+        ytbWatchedMeta: { v: 4, epoch: 0, shards: 64, count: ids.length },
+        ytbWatchedChannels: {
+            epoch: 0,
+            records: {
+                '@example': {
+                    name: 'Example', handle: 'example', channelId: '',
+                    total: 514, ids: [...ids], hidden: ['hiddenvid001']
+                }
+            }
+        }
+    };
+    for (const id of ids) {
+        const key = 'ytbWatchedShard' + shardOf(id);
+        (seed[key] ||= []).push(id);
+    }
+    const harness = createHarness(seed);
+    const db = harness.db;
+    await db.whenReady();
+
+    // The watched set itself is untouched; the pre-v5 attribution set and
+    // the (possibly foreign) stored total both reset.
+    assert.equal(db.isWatched('chanvid00001'), true);
+    assert.equal(db.isWatched('othervid0001'), true);
+    const stats = db.getChannelStats(channel);
+    assert.equal(stats.watched, 0);
+    assert.equal(stats.total, null);
+    assert.equal(stats.hidden, 1);
+
+    await db.flush();
+    assert.equal(harness.state.ytbWatchedMeta.v, 6);
+    const stored = harness.state.ytbWatchedChannels.records['@example'];
+    assert.deepEqual(Array.from(stored.ids), []);
+    assert.deepEqual(Array.from(stored.hidden), ['hiddenvid001']);
+    assert.equal(stored.total, null);
+
+    // Data recorded after the migration survives the next load.
+    db.recordChannelVideo(channel, 'chanvid00001');
+    db.setChannelTotal(channel, 3200);
+    await db.flush();
+    const reloaded = createHarness(harness.state);
+    await reloaded.db.whenReady();
+    assert.equal(reloaded.db.getChannelStats(channel).watched, 1);
+    assert.equal(reloaded.db.getChannelStats(channel).total, 3200);
+});
+
+test('v6 load keeps v5 attributions and resets only their totals', async () => {
+    const channel = { handle: 'example' };
+    const seed = {
+        ytbWatchedMeta: { v: 5, epoch: 0, shards: 64, count: 1 },
+        ['ytbWatchedShard' + shardOf('chanvid00001')]: ['chanvid00001'],
+        ytbWatchedChannels: {
+            epoch: 0,
+            records: {
+                '@example': {
+                    name: 'Example', handle: 'example', channelId: '',
+                    total: 514, ids: ['chanvid00001'], hidden: []
+                }
+            }
+        }
+    };
+    const harness = createHarness(seed);
+    const db = harness.db;
+    await db.whenReady();
+
+    const stats = db.getChannelStats(channel);
+    assert.equal(stats.watched, 1, 'v5 attributions are clean and must survive');
+    assert.equal(stats.total, null, 'the possibly-foreign total must reset');
+
+    await db.flush();
+    assert.equal(harness.state.ytbWatchedMeta.v, 6);
+    assert.deepEqual(Array.from(harness.state.ytbWatchedChannels.records['@example'].ids),
+        ['chanvid00001']);
+});
+
 test('external shard changes advance the revision and notify the content filter', async () => {
     const harness = createHarness();
     const db = harness.db;

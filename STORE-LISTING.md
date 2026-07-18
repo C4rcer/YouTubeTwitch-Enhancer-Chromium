@@ -1,13 +1,17 @@
-# Chrome Web Store release sheet — 4.8.0
+# Chrome Web Store release sheet — 4.8.4
 
-This file contains the copy and dashboard answers for the Chromium 4.8.0
+This file contains the copy and dashboard answers for the Chromium 4.8.4
 upload (Chromium versions are now aligned with the Firefox extension; see
 CHANGELOG.md). Upload the ZIP produced by `build.ps1`; do not upload this file
 or the `store-assets` directory as part of the extension package.
 
+The 4.8.0 submission was rejected over the affiliation disclaimer's list of
+product names. That sentence no longer enumerates any trademarks; it disclaims
+affiliation generically instead. Keep it that way on re-submission.
+
 ## Package
 
-- File: `youtube-twitch-enhancer-chromium-4.8.0.zip`
+- File: `youtube-twitch-enhancer-chromium-4.8.4.zip`
 - Manifest: V3
 - Minimum Chrome version: 111
 - Category: Productivity
@@ -60,11 +64,11 @@ extension logic is packaged locally. The developer operates no analytics or
 backend and does not receive or sell user data. See the privacy policy for the
 exact local storage and network disclosures.
 
-This independent extension is not affiliated with or endorsed by YouTube,
-Google, Twitch, Amazon, SponsorBlock, DeArrow, Return YouTube Dislike,
-BetterTTV, FrankerFaceZ, or 7TV.
+This is an independent extension. It is not affiliated with, endorsed by, or
+sponsored by any of the websites or third-party projects it works with. All
+product names are the property of their respective owners.
 
-## What's new in 4.8.0
+## What's new in 4.8.4
 
 - Configurable keyboard, mouse-button, and scroll-wheel player actions plus
   named playback profiles with per-channel rules on both supported sites.
@@ -77,6 +81,14 @@ BetterTTV, FrankerFaceZ, or 7TV.
   privacy summary, selective import, pre-reset backups, and undo.
 - Fixed the previous video's title persisting under the player after
   end-screen or suggested-video navigation.
+- Fixed the per-channel "Watched N / total" counter crediting other channels'
+  videos and inheriting another channel's video total. Channel identity is now
+  taken from the address bar and the visible channel header only, so cached
+  pages left in the background can no longer contribute counts.
+- The video-total reader now understands abbreviated counts such as 3.2k and
+  1.2M across languages, so a stale total corrects itself on the next visit.
+- Localized paid, rental, and free badge labels are recognised across more
+  languages, and the transcript button is found by its translated label.
 
 ## Single purpose
 
@@ -100,33 +112,31 @@ extension-storage quota or being evicted. It is not used for a remote cache.
 Adds user-invoked commands to block a channel or category, hide a video, mark
 a video watched, and open advanced settings.
 
-**Host access: www.youtube.com**
+**Host access (single combined field, 991 characters)**
 
-Runs the content and MAIN-world player helper scripts on this site only, so
-the extension can filter cards/comments, maintain local watched history, and
-add playback controls.
+The dashboard takes one justification covering every requested host, and the
+textarea caps at 1000 characters. Paste this verbatim; it names each host as a
+bare domain and avoids product names, which is what the 4.8.0 rejection was
+about.
 
-**Host access: www.twitch.tv and clips.twitch.tv**
+All host access either runs the extension's own local code on the site being
+viewed or fetches data for features the user turned on.
 
-Runs the content script on these two hosts for filtering, clip, emote,
-player, and claim tools. A MAIN-world helper runs only on `www.twitch.tv` to
-implement player/chat features that require page APIs.
+On www.youtube.com, www.twitch.tv and clips.twitch.tv the content script
+filters unwanted cards, comments and chat, maintains local watched-video
+history, and adds playback, chat and convenience controls. A MAIN-world helper
+runs on www.youtube.com and www.twitch.tv only, for player and chat features
+needing page APIs.
 
-**Host access: sponsor.ajay.app**
+The remaining hosts are API endpoints used only by optional, separately
+controlled features: sponsor.ajay.app returns community segment and title data
+and accepts user submissions and votes; returnyoutubedislikeapi.com returns the
+dislike count for the video being viewed; api.betterttv.net,
+api.frankerfacez.com and 7tv.io return emote lists for the channel being
+watched.
 
-Lets the separately controlled SponsorBlock and DeArrow features retrieve
-community segment/branding data and lets users submit or vote on segments.
-Requests are limited to fixed API endpoints on this host.
-
-**Host access: returnyoutubedislikeapi.com**
-
-Lets the separately controlled Return YouTube Dislike feature retrieve counts
-for the exact video currently being viewed.
-
-**Host access: api.betterttv.net, api.frankerfacez.com, and 7tv.io**
-
-Lets the optional third-party-emote feature retrieve JSON emote lists. The
-service worker accepts only a fixed allowlist; it is not an open network proxy.
+Requests go to fixed endpoints on a hard-coded allowlist in the service worker,
+not an open proxy. No analytics or backend is operated and no user data is sold.
 
 ## Remote code
 

@@ -43,7 +43,7 @@
     const CHANNELS_KEY = 'ytbWatchedChannels';
     const OPS_KEY = 'ytbWatchedOps';          // channel-hidden operations
     const OPS_SHARD_PREFIX = 'ytbWatchedOpsShard';
-    const STORAGE_VERSION = 3;
+    const STORAGE_VERSION = 6;
     const LOAD_ATTEMPTS = 3;
     const LOAD_SNAPSHOT_MAX_WAIT = 2000;
     const LOAD_RETRY_INITIAL = 250;
@@ -398,14 +398,47 @@
                         hiddenOpsDirty = true;
                     }
                     const persistedMeta = got[META_KEY];
+                    const persistedVersion = (persistedMeta && typeof persistedMeta === 'object' &&
+                        Number.isFinite(persistedMeta.v)) ? persistedMeta.v : 0;
+                    // v5: earlier versions could credit a channel with videos
+                    // from other channels' cached hidden pages or from the
+                    // previous page mid-navigation, so per-channel watched
+                    // tallies may be inflated beyond repair (v4 closed only
+                    // part of the leak). Drop the attribution sets once; they
+                    // rebuild from verified channel-page scans and future
+                    // watches. The watched set itself is untouched.
+                    if (persistedVersion < 5) {
+                        for (const k of Object.keys(channels)) {
+                            if (channels[k].ids.size) {
+                                channels[k].ids = new Set();
+                                channelsDirty = true;
+                            }
+                        }
+                    }
+                    // v6: pre-v5 versions could also write ANOTHER channel's
+                    // scraped video total into a record during the same stale
+                    // windows, and a wrong total never self-corrects when the
+                    // real one renders abbreviated ("3.2k videos"), which
+                    // older parsers could not read. Drop stored totals once;
+                    // the badge re-scrapes on the next channel visit.
+                    if (persistedVersion < 6) {
+                        for (const k of Object.keys(channels)) {
+                            if (channels[k].total != null) {
+                                channels[k].total = null;
+                                channelsDirty = true;
+                            }
+                        }
+                    }
                     if ((persistedMeta || totalCount > 0) &&
                         (!persistedMeta || typeof persistedMeta !== 'object' ||
+                         persistedMeta.v !== STORAGE_VERSION ||
                          normalizeEpoch(persistedMeta.epoch) !== storageEpoch ||
                          persistedMeta.count !== totalCount ||
                          persistedMeta.shards !== SHARD_COUNT)) {
                         metaDirty = true;
                     }
-                    if (dirtyOpShards.size || hiddenOpsDirty || metaDirty) scheduleFlush();
+                    if (dirtyOpShards.size || channelsDirty || hiddenOpsDirty ||
+                        metaDirty) scheduleFlush();
                     if (recovered) notifyChange();
                     return;
                 } catch (e) {

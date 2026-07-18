@@ -73,6 +73,7 @@ class FakeTile {
         if (selector === '.ytb-removed') {
             return this.classList.contains('ytb-removed') ? this : null;
         }
+        if (selector === 'ytd-browse') return this.browseEl || null;
         return selector.includes(this.tag) ? this : null;
     }
 
@@ -143,6 +144,22 @@ function loadContentHarness(watched, options = {}) {
     const elements = new Map();
     let nextTimeoutId = 1;
     const timeouts = new Map();
+    // Simulates YouTube's SPA page cache: a hidden ytd-browse for a channel
+    // page the user already left, still in the DOM with its header intact.
+    const staleChannelDom = options.staleChannelDom ? {
+        browse: {},
+        canonical: { getAttribute: () => 'https://www.youtube.com/channel/UCstale0000000000000000' },
+        header: {
+            textContent: 'stalechan @stalechan 1M subscribers 514 videos',
+            querySelector(sel) {
+                if (sel === 'a[href^="/@"]') return { getAttribute: () => '/@stalechan' };
+                if (sel.includes('yt-content-metadata-view-model')) {
+                    return { textContent: '@stalechan • 514 videos' };
+                }
+                return null;
+            }
+        }
+    } : null;
     const watchTitle = options.watchTitle || null;
     const flexyData = options.flexyData || null;
     // Tests that pass playerData exercise the direct player path (a browser
@@ -172,6 +189,12 @@ function loadContentHarness(watched, options = {}) {
         querySelector(selector) {
             if (watchTitle && selector.includes('ytd-watch-metadata h1')) return watchTitle;
             if (watchFlexy && selector === 'ytd-watch-flexy[video-id]') return watchFlexy;
+            if (staleChannelDom) {
+                if (selector === 'ytd-browse[page-subtype="channels"]:not([hidden])') return null;
+                if (selector === 'ytd-browse[page-subtype="channels"]') return staleChannelDom.browse;
+                if (selector.includes('yt-page-header-renderer')) return staleChannelDom.header;
+                if (selector.includes('link[rel="canonical"]')) return staleChannelDom.canonical;
+            }
             return null;
         },
         querySelectorAll() { return []; },
@@ -179,6 +202,7 @@ function loadContentHarness(watched, options = {}) {
     };
 
     let revision = 0;
+    const channelAttributions = [];
     const watchedDb = {
         isWatched: id => watched.has(id),
         count: () => watched.size,
@@ -189,7 +213,7 @@ function loadContentHarness(watched, options = {}) {
             revision++;
             return true;
         },
-        recordChannelVideo() {},
+        recordChannelVideo(info, id) { channelAttributions.push({ info, id }); },
         recordChannelHidden() {},
         removeHidden() {}
     };
@@ -253,6 +277,9 @@ function loadContentHarness(watched, options = {}) {
             });
         },
         mutationNeedsMaintenance,
+        getChannelInfoFromChannelPage,
+        parseVideoCountText,
+        setCurrentChannel(info) { curChannelInfo = info; },
         applyMaxQuality,
         setPlaybackRate,
         preventIdlePause,
@@ -296,6 +323,7 @@ function loadContentHarness(watched, options = {}) {
     vm.createContext(context);
     vm.runInContext(source, context, { filename: CONTENT_PATH });
     return Object.assign(context.__YTB_FILTER_TEST__, {
+        channelAttributions,
         postedMessages,
         runLatestTimeout() {
             const ids = Array.from(timeouts.keys());
@@ -1089,4 +1117,181 @@ test('a localized paid badge hides the tile and a localized free badge does not'
     assert.equal(cards[0].dataset.ytbFilterReason, 'paid');
     assert.equal(cards[1].dataset.ytbFilterReason, undefined);
     assert.equal(cards[2].dataset.ytbFilterReason, undefined);
+});
+
+test('a cached hidden channel page never leaks channel identity onto other pages', () => {
+    const api = loadContentHarness(new Set(), { staleChannelDom: true });
+    api.configure({ settings: { enabled: true } });
+
+    api.setPath('/watch?v=abc12345678');
+    assert.equal(api.getChannelInfoFromChannelPage(), null,
+        'watch pages must not inherit the identity of the cached channel browse');
+    api.setPath('/');
+    assert.equal(api.getChannelInfoFromChannelPage(), null);
+    api.setPath('/feed/subscriptions');
+    assert.equal(api.getChannelInfoFromChannelPage(), null);
+
+    // On a real channel page the URL wins; the stale hidden header (a
+    // different channel) must contribute nothing, and without a rendered
+    // matching header the identity stays unconfirmed (no attribution).
+    api.setPath('/@realchan/videos');
+    const info = api.getChannelInfoFromChannelPage();
+    assert.equal(info.handle, 'realchan');
+    assert.equal(info.channelId, '', 'the stale canonical link must not supply a channel ID');
+    assert.equal(info.name, '', 'the stale hidden header must not supply a name');
+    assert.equal(info.confirmed, false,
+        'identity must stay unconfirmed until the visible header matches the URL');
+});
+
+test('watched tiles on a channel page are only credited to their own channel', () => {
+    const watched = new Set(['ownvid000001', 'foreignvid01', 'barevid00001']);
+    const api = loadContentHarness(watched);
+    api.configure({
+        settings: {
+            enabled: true,
+            hideWatched: true,
+            watchedChannel: true,
+            reduceFlashing: true
+        }
+    });
+    api.setPath('/@pagechan/videos');
+    api.setCurrentChannel({ handle: 'pagechan', channelId: '', name: 'Page Chan', confirmed: true });
+
+    const own = new FakeTile('ownvid000001', { handle: 'pagechan', channel: 'Page Chan' });
+    const foreign = new FakeTile('foreignvid01', { handle: 'otherchan', channel: 'Other Chan' });
+    const bare = new FakeTile('barevid00001');
+    bare.handle = '';
+    bare.channel = '';
+    bare.setVideo('barevid00001');   // regenerate anchors without a byline
+    api.processTiles([own, foreign, bare]);
+
+    assert.equal(own.dataset.ytbFilterReason, 'watched-history');
+    assert.equal(foreign.dataset.ytbFilterReason, 'watched-history',
+        'the foreign tile is still hidden as watched, just not attributed');
+    assert.equal(bare.dataset.ytbFilterReason, 'watched-history');
+    assert.deepEqual(
+        api.channelAttributions.map(a => a.id).sort(),
+        ['barevid00001', 'ownvid000001'],
+        'a tile with a different byline must not count toward this channel');
+    for (const a of api.channelAttributions) {
+        assert.equal(a.info.handle, 'pagechan');
+    }
+});
+
+test('byline-less tiles outside the confirmed channel browse are never attributed', () => {
+    const watched = new Set(['transvid0001', 'ownvid000001', 'cachevid0001']);
+    const api = loadContentHarness(watched);
+    api.configure({
+        settings: {
+            enabled: true,
+            hideWatched: true,
+            watchedChannel: true,
+            reduceFlashing: true
+        }
+    });
+    api.setPath('/@pagechan/videos');
+    const strip = tile => {
+        tile.handle = '';
+        tile.channel = '';
+        tile.setVideo(tile.id);   // regenerate anchors without a byline
+        return tile;
+    };
+
+    // Mid-navigation (URL flipped, header still the previous channel's):
+    // identity is unconfirmed, so the old page's grid attributes nothing.
+    api.setCurrentChannel({ handle: 'pagechan', channelId: '', name: '', confirmed: false, browse: null });
+    const transitional = strip(new FakeTile('transvid0001'));
+    api.processTiles([transitional]);
+    assert.equal(transitional.dataset.ytbFilterReason, 'watched-history',
+        'hiding still applies while attribution is suspended');
+    assert.deepEqual(api.channelAttributions, []);
+
+    // Confirmed page: only tiles inside the channel's visible browse count.
+    // The SPA keeps other channels' cached pages hidden in the DOM with
+    // their byline-less grids intact; those must not be credited here.
+    const pageBrowse = { label: 'visible pagechan browse' };
+    api.setCurrentChannel({
+        handle: 'pagechan', channelId: '', name: 'Page Chan',
+        confirmed: true, browse: pageBrowse
+    });
+    const own = strip(new FakeTile('ownvid000001'));
+    own.browseEl = pageBrowse;
+    const cached = strip(new FakeTile('cachevid0001'));
+    cached.browseEl = { label: 'hidden cached browse of another channel' };
+    api.processTiles([own, cached]);
+
+    assert.equal(own.dataset.ytbFilterReason, 'watched-history');
+    assert.equal(cached.dataset.ytbFilterReason, 'watched-history');
+    assert.deepEqual(api.channelAttributions.map(a => a.id), ['ownvid000001'],
+        'only the tile inside the confirmed visible browse is credited');
+});
+
+test('a reused grid card keeps the old channel until it is restamped (carry-over window)', () => {
+    // Verified live: on a channel-to-channel SPA navigation the header
+    // confirms the new channel seconds before the reused grid restamps, so
+    // the previous channel's byline-less cards sit inside the CONFIRMED
+    // browse. Those carried-over cards must never be credited to the new
+    // channel; once restamped with the new channel's videos they count.
+    const watched = new Set(['oldchanvid01', 'newchanvid01']);
+    const api = loadContentHarness(watched);
+    api.configure({
+        settings: {
+            enabled: true,
+            hideWatched: true,
+            watchedChannel: true,
+            reduceFlashing: true
+        }
+    });
+
+    const card = new FakeTile('oldchanvid01');
+    card.handle = '';
+    card.channel = '';
+    card.setVideo('oldchanvid01');   // byline-less grid card
+
+    api.setPath('/@channela/videos');
+    api.setCurrentChannel({ handle: 'channela', channelId: '', name: 'Channel A', confirmed: true });
+    api.processTiles([card]);
+    assert.deepEqual(api.channelAttributions.map(a => a.info.handle + ':' + a.id),
+        ['channela:oldchanvid01'], 'on its own page the grid card is credited normally');
+
+    // SPA navigation to channel B: same element, same video, new context.
+    api.setPath('/@channelb/videos');
+    api.setCurrentChannel({ handle: 'channelb', channelId: '', name: 'Channel B', confirmed: true });
+    api.processTiles([card]);
+    assert.equal(card.dataset.ytbFilterReason, 'watched-history',
+        'the carried-over card is still hidden as watched');
+    assert.deepEqual(api.channelAttributions.map(a => a.info.handle + ':' + a.id),
+        ['channela:oldchanvid01'],
+        'the carried-over card must not be credited to the new channel');
+
+    // YouTube restamps the recycled card with the new channel's video.
+    card.setVideo('newchanvid01');
+    api.processTiles([card]);
+    assert.deepEqual(api.channelAttributions.map(a => a.info.handle + ':' + a.id),
+        ['channela:oldchanvid01', 'channelb:newchanvid01'],
+        'after the restamp the card belongs to the new channel');
+});
+
+test('channel video totals parse abbreviated counts and reject foreign header rows', () => {
+    const api = loadContentHarness(new Set());
+    api.configure({ settings: { enabled: true } });
+    const parse = api.parseVideoCountText;
+
+    assert.equal(parse('514 videos'), 514);
+    assert.equal(parse('1,234 videos'), 1234);
+    assert.equal(parse('@gamersnexus • 2.63m subscribers • 3.2k videos'), 3200,
+        'the subscriber count must not shadow the abbreviated video count');
+    assert.equal(parse('3.2K videos'), 3200);
+    assert.equal(parse('3,2 mil vídeos'), 3200);
+    assert.equal(parse('1,2 Tsd. Videos'), 1200);
+    assert.equal(parse('1,2 тыс. видео'), 1200);
+    assert.equal(parse('1.5m videos'), 1500000);
+    assert.equal(parse('1.2万本の動画'), 12000);
+    assert.equal(parse('no counts here'), null);
+
+    // While a reused header restamps, its rows can still belong to the
+    // previous channel; a mismatched @handle rejects the whole row.
+    assert.equal(parse('@gamersnexus • 3.2k videos', 'gamersnexus'), 3200);
+    assert.equal(parse('@oldchannel • 514 videos', 'gamersnexus'), null);
+    assert.equal(parse('514 videos', 'gamersnexus'), 514);
 });

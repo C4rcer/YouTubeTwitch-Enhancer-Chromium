@@ -6,15 +6,29 @@ shipped from this repo as "4.8.0" and "4.8.1"; they correspond to
 Firefox 4.7.1 and 4.7.2 and have been renumbered to match (nothing was
 ever published to the Chrome Web Store under the old numbers).
 
-## Unreleased
+## 4.8.4 — 2026-07-18
 
-Parity with the Firefox repo's unreleased language-coverage fixes.
+Parity with the Firefox 4.8.1 language-coverage fixes and the Firefox
+4.8.2 / 4.8.3 / 4.8.4 channel watched-counter fixes, released together
+as a single Chrome Web Store update (4.8.0 was the last submission, so
+4.8.1 through 4.8.3 have no separate Chromium package).
 
 ### Fixed
 
 - Paid / rental badge hiding now recognises Japanese, Korean, Chinese, Russian, Turkish, Polish, and Arabic labels, and keeps localized "free with ads" badges visible, matching the members-only badge's language coverage. It also matches each language's bare "paid" badge ("Kostenpflichtig", 有料, and similar), which appears alongside the buy/rent wording; the German strings were verified against the live storefront.
 - The desktop guide's Shorts entry is now also matched by its language-independent /shorts link, and the Japanese channel tab (ショート) is hidden like its English counterpart.
 - The workspace's "Show transcript" lookup now matches localized button labels (Transkript, transcription, 文字起こし, and similar) instead of only the English wording.
+- The channel page "Watched N / total" badge could exceed the channel's own video count (for example 596 / 514). YouTube's SPA keeps the previous channel page, header included, hidden in the DOM after navigation (verified live: on a watch page reached from a channel, the hidden `ytd-browse[page-subtype="channels"]`, its header h1, and even the channel's canonical link all remain readable). Channel-page detection therefore kept reporting the last visited channel on watch pages and feeds, and every watched video encountered there, including the entire related sidebar, was credited to that channel's tally. Channel identity is now derived from the URL and scraped only from the visible channel header, with a stale header that names a different handle contributing nothing.
+- On a genuine channel page, a tile carrying a different channel's byline (channel home shelves and featured playlists can surface other channels' videos) is still hidden as watched but no longer credited to the page channel's "Watched" count.
+- The per-channel "Watched" tally could still absorb other channels' videos on channel-to-channel navigation, which is why the counter jumped when moving between channel pages. Two remaining leaks, both verified live: the SPA keeps other channels' cached pages hidden in the DOM with their byline-less video grids intact, and the tile scanner visits them; and on a channel-to-channel navigation the reused page confirms its new header seconds before the grid restamps, so the previous channel's byline-less cards briefly sit inside the new channel's confirmed page (about 3 seconds in live sampling). Channel attribution of a byline-less card now requires all of: a confirmed page identity (rendered header matching the URL, canonical link for /channel/UC pages), the card living inside that channel's visible page, and the card not being a carry-over (a recycled element still holding the video it had under another page's context attributes nothing until it is restamped with the new channel's video). Hiding of watched videos is unaffected throughout, including while attribution is suspended.
+- The "Watched N / total" badge, its insertion point, and the scraped channel video total now wait for the confirmed header, so a mid-navigation or hidden cached header can no longer supply another channel's total or swallow the badge.
+- A channel could show another channel's video total in the badge (e.g. Gamers Nexus, 3.2k videos, showing "/ 514" inherited from a previously visited channel). Two causes: earlier versions wrote the previous channel's scraped total into the new channel's record during the same stale-header windows, and the total parser could not read abbreviated counts ("3.2k videos"), so the wrong stored value never self-corrected on the channel's own page. The parser now handles abbreviated counts (3.2k, 1.5m, 3,2 mil, 1,2 Tsd., 1,2 тыс., 1.2万 and similar, with ',' or '.' before a multiplier read as a decimal point), refuses a header row that names a different @handle than the current channel, and, as a side effect of the same fix, Russian and Greek totals parse for the first time (the old word-boundary check never matched after Cyrillic or Greek words).
+- Watched database v6: per-channel watched attributions are reset once (inflated tallies cannot be repaired in place), and stored channel totals are reset once, since older data may hold another channel's count. The watched-video set itself and the hidden tallies are untouched, so the migration never un-hides a video. Attributions rebuild from each channel's own pages and future watches; totals re-scrape on the next visit to each channel page, and the badge already falls back to the freshly scraped value, so the denominator reappears immediately.
+
+### Validation
+
+- Live-verified on youtube.com (in Firefox, on the shared content script): the URL flips first, the header confirms roughly 300ms later, and the reused grid keeps the previous channel's cards for about 3 seconds under the new header. The abbreviated parser was verified against the live Gamers Nexus header row ("@GamersNexus•2.63m subscribers•3.2k videos" parses to 3200, skipping the subscriber count).
+- New regressions cover the attribution guards (unconfirmed identity attributes nothing, byline-less cards outside the confirmed visible page are ignored, a carried-over card is not credited until it is restamped, foreign-byline tiles are hidden without being attributed), the abbreviated total formats across locales with the subscriber-count trap and foreign-handle rejection, and the v6 migration dropping stale attributions and totals while preserving the watched set and hidden tallies. The Chromium suite passes 96/96 (the Firefox 94 plus the two Chromium MAIN-world bridge regressions).
 
 ## 4.8.0 — 2026-07-16
 
