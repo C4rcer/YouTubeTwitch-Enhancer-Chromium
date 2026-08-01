@@ -631,9 +631,10 @@
      * Drops are the awkward one. Verified live 2026-07: a completed drop
      * shows an in-chat callout and a pink dot on the Drops button, but the
      * green "Claim" in the drops popover is only an <a href="/drops/
-     * inventory"> — the real claim happens on the inventory page, whose
-     * claim control is a styled <a> ("Claim"), not a button. So a stream
-     * page can never claim in place.
+     * inventory">: the real claim happens on the inventory page. Its
+     * claim control varies: a styled <a> ("Claim") in early 2026-07, a
+     * plain <button> ("Claim Now", no stable attrs) as of 2026-07-22.
+     * Either way, a stream page can never claim in place.
      *
      * Hands-free approach: when a drop looks claimable and we're NOT on the
      * inventory page, ask the background script to open /drops/inventory in
@@ -648,8 +649,9 @@
     let dropWasClaimable = false;
     let inventoryCloseArmed = false;
 
-    // Claim every "Claim" control on the current inventory page (styled <a>
-    // or <button>, exact text, not disabled). Returns how many were clicked.
+    // Claim every claim control on the current inventory page (styled <a>
+    // or <button>, exact text "Claim" / "Claim Now", not disabled).
+    // Returns how many were clicked.
     function claimInventoryHere() {
         const els = [...document.querySelectorAll(
             'main a[data-a-target*="claim" i], main button[data-a-target*="claim" i], ' +
@@ -658,7 +660,7 @@
         )].filter(b => {
             const stable = ((b.getAttribute('data-a-target') || '') + ' ' +
                 (b.getAttribute('data-test-selector') || '')).toLowerCase().includes('claim');
-            return (stable || /^claim$/i.test((b.textContent || '').trim())) && !b.disabled &&
+            return (stable || /^claim( now)?$/i.test((b.textContent || '').trim())) && !b.disabled &&
                 b.getAttribute('href') !== '/drops/inventory';
         });
         let n = 0;

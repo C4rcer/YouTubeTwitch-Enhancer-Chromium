@@ -6,6 +6,12 @@ shipped from this repo as "4.8.0" and "4.8.1"; they correspond to
 Firefox 4.7.1 and 4.7.2 and have been renumbered to match (nothing was
 ever published to the Chrome Web Store under the old numbers).
 
+## Unreleased
+
+### Fixed
+
+- Auto-claim drops silently stopped claiming on the drops inventory page. Twitch changed the inventory claim control from a styled link with the exact text "Claim" to a plain button labelled "Claim Now" with no stable data attributes, so the claim pass (which still ran every 2.5 seconds) never matched anything. The matcher now accepts "Claim Now" as well as "Claim"; all existing guards (stable-attribute match, disabled state, skipping the popover's link to the inventory page) are unchanged. Matches Firefox 4.8.5.
+
 ## 4.8.4 — 2026-07-18
 
 Parity with the Firefox 4.8.1 language-coverage fixes and the Firefox
