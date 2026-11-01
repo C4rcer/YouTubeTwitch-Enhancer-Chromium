@@ -2449,6 +2449,8 @@
     let deArrowAppliedThumbs = !!document.querySelector('img[data-ytb-de-thumb]');
     let deArrowWatchNavigating = false;
     let deArrowWatchNavigationTimer = null;
+    const WATCH_TITLE_SELECTOR =
+        'ytd-watch-metadata h1 yt-formatted-string, h1.ytd-watch-metadata';
     let deArrowWatchPlayerData = null;
     let deArrowWatchPlayerRequestSeq = 0;
     let deArrowWatchPlayerPending = null;
@@ -2991,24 +2993,49 @@
         }
     }
 
-    // After a heading write, YouTube's next hydration can append its own text
-    // or attributed-string node beside the foreign node we wrote instead of
-    // replacing it, leaving the previous and current titles rendered together.
-    // Remove exactly the node we wrote once YouTube has supplied any other
-    // content, along with the now-stale write markers on that holder.
-    function pruneDeArrowWatchDuplicate(holder) {
+    // YouTube renders the watch title through ShadyDOM, which remembers the
+    // text node it inserted and, on the next video, removes only that node
+    // before inserting the new one (verified live 2026-11-01: its node carries
+    // page-world `__shady` data). A text node written any other way is
+    // invisible to it and stays beside every later title: our DeArrow or
+    // repair write, one left by an add-on instance that was removed or updated
+    // mid-video, or the original restored after DeArrow was switched off.
+    // Chromium content scripts run in an isolated world that cannot see page
+    // expandos, so here this always answers false and only the write-marker
+    // proof below applies.
+    function shadyOwnsNode(node) {
+        try {
+            const page = node.wrappedJSObject || node;
+            return !!page.__shady;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Remove title text YouTube no longer manages once it has rendered its
+    // own. Two proofs: ShadyDOM owns another text node (fails closed when
+    // ShadyDOM owns none, so a page without it is left alone), or the node
+    // matches our recorded write and YouTube supplied other content. Clears
+    // the now-stale write markers on that holder.
+    function pruneWatchTitleDuplicate(holder) {
         if (!holder || !holder.dataset || !holder.childNodes ||
             holder.childNodes.length < 2) return false;
-        const written = holder.dataset.ytbDeWatchWrittenTitle ||
-            holder.dataset.ytbDeAppliedTitle || '';
-        if (!written) return false;
         const children = [...holder.childNodes];
-        const ours = children.filter(node => node.nodeType === 3 &&
-            (node.textContent || '') === written);
-        const theirs = children.some(node => (node.textContent || '').trim() &&
-            (node.textContent || '') !== written);
-        if (!ours.length || !theirs) return false;
-        for (const node of ours) holder.removeChild(node);
+        const texts = children.filter(node => node.nodeType === 3 &&
+            (node.textContent || '').trim());
+        let stale = texts.filter(node => !shadyOwnsNode(node));
+        if (stale.length === texts.length) {
+            const written = holder.dataset.ytbDeWatchWrittenTitle ||
+                holder.dataset.ytbDeAppliedTitle || '';
+            if (!written) return false;
+            stale = children.filter(node => node.nodeType === 3 &&
+                (node.textContent || '') === written);
+            const theirs = children.some(node => (node.textContent || '').trim() &&
+                (node.textContent || '') !== written);
+            if (!theirs) return false;
+        }
+        if (!stale.length) return false;
+        for (const node of stale) holder.removeChild(node);
         [
             'data-ytb-de-title', 'data-ytb-de-applied-title',
             'data-ytb-de-original-title', 'data-ytb-de-original-title-video',
@@ -3018,14 +3045,23 @@
         return true;
     }
 
+    // Runs on every pass whatever the DeArrow setting, because a leftover
+    // outlives the setting (and the add-on instance) that wrote it.
+    function pruneWatchTitleLeftovers() {
+        if (location.pathname !== '/watch') return;
+        const h1 = document.querySelector(WATCH_TITLE_SELECTOR);
+        const target = h1 && deArrowTextTarget(h1);
+        if (!target) return;
+        pruneWatchTitleDuplicate(target);
+        pruneWatchTitleDuplicate(target.parentElement);
+    }
+
     function processDeArrowWatchPage() {
         if (!settings.deArrowTitles || location.pathname !== '/watch' ||
             deArrowWatchNavigating) return;
 
         const vid = watchVideoId();
-        const h1 = document.querySelector(
-            'ytd-watch-metadata h1 yt-formatted-string, h1.ytd-watch-metadata'
-        );
+        const h1 = document.querySelector(WATCH_TITLE_SELECTOR);
         if (h1) observeFilterDetails(h1);
 
         // During SPA navigation YouTube can update the heading, route, flexy and
@@ -3046,8 +3082,8 @@
         if (vid && target) {
             // The write may sit on the target itself or on its parent when
             // YouTube re-rendered the heading with a new inner text holder.
-            pruneDeArrowWatchDuplicate(target);
-            pruneDeArrowWatchDuplicate(target.parentElement);
+            pruneWatchTitleDuplicate(target);
+            pruneWatchTitleDuplicate(target.parentElement);
             titleReady = prepareDeArrowTitleIdentity(target, vid);
             // A heading we wrote for another video can be reused with no
             // replacement markers left behind — a native repair below leaves
@@ -3281,6 +3317,7 @@
                 if (slider) slider.remove();
                 document.querySelectorAll('.ytb-cinema-btn, .ytb-extra-btn').forEach(b => b.remove());
                 document.querySelectorAll('.ytb-sb-badge').forEach(b => b.remove());
+                pruneWatchTitleLeftovers();
                 restoreDeArrowTitles();
                 restoreDeArrowThumbs();
                 removeChannelBadge();
@@ -3331,6 +3368,7 @@
             updateChannelWatchBadge();          // "Watched N / total" on channel pages
             ensureSponsorBlock();
             updateSbMarkers();
+            pruneWatchTitleLeftovers();
             if (!settings.deArrowTitles) restoreDeArrowTitles();
             if (!settings.deArrowThumbs) restoreDeArrowThumbs();
             const wantsTileEnhancements =
@@ -4873,6 +4911,11 @@
                 const dirtyTiles = filterMutatedTiles(records);
                 refreshMutatedComments(records);
                 queueTileEnhancements(dirtyTiles);
+                // Drop a stale title before it paints beside the new one.
+                if (records.some(r => r.addedNodes && r.addedNodes.length &&
+                    r.target.nodeName === 'YT-FORMATTED-STRING')) {
+                    pruneWatchTitleLeftovers();
+                }
             }
 
             if (document.hidden) {
