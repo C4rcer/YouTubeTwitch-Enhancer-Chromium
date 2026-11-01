@@ -2034,27 +2034,77 @@
         return loginFromHref('/' + location.pathname.split('/')[1]);
     }
 
+    /* Which category a right-click means (verified live 2026-11-01). The
+     * target's own category link wins. Otherwise the card it sits on decides:
+     * a thumbnail, title, padding or tag pill (the "IRL" pill on Browse cards
+     * is a sibling <button>, not inside a link) means that card's category,
+     * and must never fall through to the page's: on a channel page that
+     * would block the watched stream's category instead. Sidebar cards show
+     * their category as plain text only, so the name is looked up against a
+     * category link elsewhere on the page. Home-page shelf headings such as
+     * "Just Chatting & IRL" link to /directory/collection/…, a curated mix of
+     * categories the page never lists, so those get their own message. */
+    const CATEGORY_LINK_SEL = 'a[href^="/directory/category/"], a[href^="/directory/game/"]';
+    const CATEGORY_CARD_SEL = 'article, .side-nav-card, [data-a-target="front-page-carousel"]';
+    const COLLECTION_PATH_RE = /^\/directory\/collection\/[^/?#]+/;
+
+    function linkPath(a) {
+        try { return new URL(a.getAttribute('href') || '', location.href).pathname; }
+        catch (e) { return ''; }
+    }
+
+    function categoryLinkName(link, scope) {
+        // Shelf cards wrap name, tag and viewer count in one link, and the
+        // name is its first titled element. Browse box art is image-only, so
+        // fall back to a link with the same href that has text.
+        const titled = link.querySelector('[title]');
+        if (titled) return titled.getAttribute('title').trim().slice(0, 80);
+        const href = link.getAttribute('href');
+        for (const a of [link, ...(scope ? scope.querySelectorAll('a[href]') : [])]) {
+            const text = a.getAttribute('href') === href ? (a.textContent || '').trim() : '';
+            if (text) return text.slice(0, 80);
+        }
+        return '';
+    }
+
+    function categoryInCard(card) {
+        // Fail closed: a container naming more than one category isn't a card.
+        const links = [...card.querySelectorAll(CATEGORY_LINK_SEL)]
+            .filter(a => catSlugFromHref(a.getAttribute('href')));
+        const slugs = new Set(links.map(a => catSlugFromHref(a.getAttribute('href'))));
+        if (slugs.size !== 1) return null;
+        return { slug: [...slugs][0], name: categoryLinkName(links[0], card) };
+    }
+
+    function categoryByName(name) {
+        const want = name.toLowerCase();
+        for (const link of document.querySelectorAll(CATEGORY_LINK_SEL)) {
+            const slug = catSlugFromHref(link.getAttribute('href'));
+            if (slug && categoryLinkName(link, cellOf(link)).toLowerCase() === want) return { slug, name };
+        }
+        return null;
+    }
+
     function categoryFromTarget(target) {
         if (target && target.closest) {
             const a = target.closest('a[href]');
-            if (a) {
-                const slug = catSlugFromHref(new URL(a.href, location.origin).pathname);
-                if (slug) return { slug, name: (a.textContent || '').trim().slice(0, 80) };
-            }
-            const art = target.closest('article');
-            if (art) {
-                const link = art.querySelector('a[href^="/directory/category/"], a[href^="/directory/game/"]');
-                if (link) {
-                    return {
-                        slug: catSlugFromHref(link.getAttribute('href')),
-                        name: (link.textContent || '').trim().slice(0, 80)
-                    };
-                }
+            const slug = a && catSlugFromHref(linkPath(a));
+            if (slug) return { slug, name: categoryLinkName(a, a.closest(CATEGORY_CARD_SEL) || cellOf(a)) };
+            if (a && COLLECTION_PATH_RE.test(linkPath(a))) return { slug: '', collection: true };
+            const card = target.closest(CATEGORY_CARD_SEL) || cellOf(target);
+            if (card) {
+                const found = categoryInCard(card);
+                if (found) return found;
+                const label = card.querySelector(
+                    '[data-a-target="side-nav-card-metadata"] p[title]:not([data-a-target="side-nav-title"])');
+                const name = label && label.getAttribute('title').trim();
+                return name ? (categoryByName(name) || { slug: '', name }) : null;
             }
         }
         // Category page itself, or the stream's category link on a channel page.
         const pageSlug = catSlugFromHref(location.pathname);
         if (pageSlug) return { slug: pageSlug, name: '' };
+        if (COLLECTION_PATH_RE.test(location.pathname)) return { slug: '', collection: true };
         const streamCat = document.querySelector('a[data-a-target="stream-game-link"], [data-a-target="stream-game-link"] a');
         if (streamCat) {
             return {
@@ -2079,6 +2129,11 @@
 
     function blockCategoryAction() {
         const info = categoryFromTarget(lastContextTarget);
+        if (info && info.collection) {
+            toast('That’s a collection of categories. Right-click a stream in it to block its category', '');
+            return;
+        }
+        if (info && !info.slug && info.name) { toast('Open the channel to block', info.name); return; }
         if (!info || !info.slug) { toast('Couldn’t work out which category that is', ''); return; }
         if (blockedCatSlugs.has(info.slug)) { toast('Already blocked', info.name || info.slug); return; }
         state.twitchBlockedCategories.push({ slug: info.slug, name: info.name || '', addedAt: Date.now() });

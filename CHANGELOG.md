@@ -11,6 +11,7 @@ ever published to the Chrome Web Store under the old numbers).
 ### Fixed
 
 - Auto-claim drops silently stopped claiming on the drops inventory page. Twitch changed the inventory claim control from a styled link with the exact text "Claim" to a plain button labelled "Claim Now" with no stable data attributes, so the claim pass (which still ran every 2.5 seconds) never matched anything. The matcher now accepts "Claim Now" as well as "Claim"; all existing guards (stable-attribute match, disabled state, skipping the popover's link to the inventory page) are unchanged. Matches Firefox 4.8.5.
+- "Block this Twitch category" now resolves the card you right-clicked, wherever on it you clicked (Browse card tag pills such as "IRL", box art, padding, the home page's featured stream, sidebar cards by name), instead of answering "Couldn't work out which category that is". A right-click on a sidebar card no longer falls through to the watched stream's category, collection shelf headings such as "Just Chatting & IRL" get a message explaining they are not categories, and shelf category cards save a clean name. Same change as the Firefox "Unreleased" fix of 2026-11-01; its regression tests live in the Firefox repo's `tests/twitch.test.js`, which this repo does not have yet.
 
 ## 4.8.4 — 2026-07-18
 
