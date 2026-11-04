@@ -283,12 +283,6 @@ function loadContentHarness(watched, options = {}) {
         applyMaxQuality,
         setPlaybackRate,
         preventIdlePause,
-        completeMaxQuality(vid) {
-            onPageQualityMessage({
-                source: window,
-                data: { type: 'ytb-max-quality-done', vid }
-            });
-        },
         setPath(path) {
             const url = new URL(path, location.origin);
             location.pathname = url.pathname;
@@ -347,20 +341,20 @@ function childListRecord(root) {
     return { type: 'childList', target: root, addedNodes: [root], removedNodes: [] };
 }
 
-test('Chromium max-quality bridge posts once and accepts MAIN-world completion', () => {
+test('Chromium max-quality bridge asks the MAIN world on every pass', () => {
     const h = loadContentHarness(new Set());
     h.setPath('/watch');
     h.setLocationSearch('?v=bridge123');
     h.setElement('movie_player', {});
     h.applyMaxQuality();
+    h.applyMaxQuality();
 
-    assert.equal(h.postedMessages.length, 1);
+    // page-quality.js keeps the per-video state, so the request repeats:
+    // a single early answer was undone by YouTube's reset after navigation.
+    assert.equal(h.postedMessages.length, 2);
     assert.equal(h.postedMessages[0].message.type, 'ytb-max-quality');
     assert.equal(h.postedMessages[0].message.vid, 'bridge123');
-
-    h.completeMaxQuality('bridge123');
-    h.applyMaxQuality();
-    assert.equal(h.postedMessages.length, 1, 'completed video should not be requested again');
+    assert.equal(h.postedMessages[1].message.vid, 'bridge123');
 });
 
 test('Chromium playback-rate and idle-timer bridges relay to the MAIN world', () => {
@@ -1294,4 +1288,28 @@ test('channel video totals parse abbreviated counts and reject foreign header ro
     assert.equal(parse('@gamersnexus • 3.2k videos', 'gamersnexus'), 3200);
     assert.equal(parse('@oldchannel • 514 videos', 'gamersnexus'), null);
     assert.equal(parse('514 videos', 'gamersnexus'), 514);
+});
+
+const { fakeQualityPlayer, replayNavigationReset } = require('./quality-fixture');
+
+test('max quality survives the reset YouTube does while loading the next video', () => {
+    const h = loadContentHarness(new Set());
+    h.configure({ settings: { enabled: true, maxQuality: true } });
+    const player = fakeQualityPlayer();
+    h.setElement('movie_player', player);
+    replayNavigationReset(player, vid => h.setPath('/watch?v=' + vid), () => h.applyMaxQuality());
+});
+
+test('max quality waits until the player is on the video in the URL', () => {
+    const h = loadContentHarness(new Set());
+    h.configure({ settings: { enabled: true, maxQuality: true } });
+    const player = fakeQualityPlayer();
+    h.setElement('movie_player', player);
+    h.setPath('/watch?v=nextVideo01');
+    player.preferred = 'large';
+    h.applyMaxQuality();
+    assert.equal(player.sets, 0, "the previous video's streams are not this video's");
+    player.vid = 'nextVideo01';
+    h.applyMaxQuality();
+    assert.equal(player.preferred, 'hd2160');
 });

@@ -6,9 +6,10 @@
  * can, via wrappedJSObject — this file is not in the Firefox
  * manifest). content.js posts a message per operation and this script
  * performs it against the page-world player:
- *   ytb-max-quality  { vid }   force the highest available quality;
- *                              answered with "ytb-max-quality-done"
- *                              so content.js stops retrying.
+ *   ytb-max-quality  { vid }   keep the highest available quality.
+ *                              content.js asks on every pass; the
+ *                              per-video state lives here (see the
+ *                              handler below).
  *   ytb-set-rate     { rate }  set the playback rate through the
  *                              player API so its UI stays in sync
  *                              (content.js sets the element rate too).
@@ -29,6 +30,10 @@
  * ================================================================== */
 (function () {
     'use strict';
+
+    // ytb-max-quality state for the video in the URL.
+    const QUALITY_SETTLE_MS = 5000;
+    let qualityTarget = { vid: null, firstSeenAt: 0, settled: false };
 
     window.addEventListener('message', (e) => {
         if (e.source !== window || !e.data || typeof e.data.type !== 'string') return;
@@ -106,19 +111,44 @@
         }
 
         if (e.data.type === 'ytb-max-quality') {
+            // One early attempt is not enough (verified live 2026-11 on
+            // Firefox): after an SPA navigation the player reports the new
+            // video with its streams, then about 100 ms later resets its
+            // preference to "auto" while it loads that video's formats. So
+            // each request re-applies the best level until the video plays at
+            // it (or QUALITY_SETTLE_MS have passed). After that a quality
+            // picked by hand is kept; only a fall back to "auto" is corrected.
+            // Same rules as content.js's direct (Firefox) path.
             const vid = e.data.vid;
-            if (!vid) return;
+            if (typeof vid !== 'string' || !vid) return;
+            if (qualityTarget.vid !== vid) qualityTarget = { vid, firstSeenAt: 0, settled: false };
             const player = document.getElementById('movie_player');
             if (!player || typeof player.getAvailableQualityLevels !== 'function') return;
-            let levels;
-            try { levels = player.getAvailableQualityLevels(); } catch (err) { return; }
-            if (!levels || !levels.length) return;        // player not ready yet — content.js retries
-            const best = levels[0];                       // ordered highest -> lowest
+            if (player.classList.contains('ad-showing')) return;   // the ad's streams
+            const canConfirm = typeof player.getPreferredQuality === 'function';
+            let levels, playerVid, preferred, playing;
+            try {
+                levels = [...(player.getAvailableQualityLevels() || [])];
+                const data = typeof player.getVideoData === 'function' ? player.getVideoData() : null;
+                playerVid = data && data.video_id;
+                preferred = canConfirm ? player.getPreferredQuality() : '';
+                playing = typeof player.getPlayerState === 'function' && player.getPlayerState() === 1;
+            } catch (err) { return; }
+            const best = levels.find(level => level !== 'auto');   // ordered highest -> lowest
+            if (!best || (playerVid && playerVid !== vid)) return;  // not this video's streams yet
+            const now = Date.now();
+            if (!qualityTarget.firstSeenAt) qualityTarget.firstSeenAt = now;
+            if (preferred === best) {
+                if (playing || now - qualityTarget.firstSeenAt >= QUALITY_SETTLE_MS) qualityTarget.settled = true;
+                return;
+            }
+            if (qualityTarget.settled && preferred !== 'auto') return;   // picked by hand
             try {
                 if (typeof player.setPlaybackQualityRange === 'function') player.setPlaybackQualityRange(best, best);
                 if (typeof player.setPlaybackQuality === 'function') player.setPlaybackQuality(best);
-                window.postMessage({ type: 'ytb-max-quality-done', vid }, location.origin);
             } catch (err) { /* ignore */ }
+            // Without getPreferredQuality nothing can confirm it: one attempt.
+            if (!canConfirm) qualityTarget.settled = true;
         }
     });
 })();
