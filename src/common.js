@@ -257,14 +257,58 @@ const YTB = (function () {
         return Math.min(5, Math.max(1, Math.round(v * 100) / 100));
     }
 
+    // Hidden-video details and undo history live in their own keys (see
+    // feature-core.js), but pages still work with one joined record: load()
+    // folds the keys back in, together with any copy an older version left
+    // inside `data`, and save() splits them out again.
+    function splitKeys() {
+        return typeof YTBFeatures !== 'undefined'
+            ? [YTBFeatures.HIDDEN_VIDEO_META_KEY, YTBFeatures.RECENT_ACTIONS_KEY] : [];
+    }
+
+    // What the separate keys held when this page last read or wrote them.
+    // save() rewrites a key only when the page changed it, so a settings
+    // toggle doesn't resend the whole history to every open tab, and a stale
+    // copy can't drop another tab's newer entries.
+    const lastSplit = {};
+
+    function splitSnapshot(record) {
+        return {
+            meta: JSON.stringify(record.hiddenVideoMetadata),
+            actions: JSON.stringify(record.recentActions)
+        };
+    }
+
     async function load() {
-        const r = await api.storage.local.get(STORAGE_KEY);
-        return normalize(r[STORAGE_KEY]);
+        const r = await api.storage.local.get([STORAGE_KEY, ...splitKeys()]);
+        const stored = r[STORAGE_KEY] && typeof r[STORAGE_KEY] === 'object' ? r[STORAGE_KEY] : {};
+        if (!splitKeys().length) return normalize(stored);
+        const record = normalize(Object.assign({}, stored, {
+            hiddenVideoMetadata: YTBFeatures.mergeHiddenVideoMetadata(
+                stored.hiddenVideoMetadata, r[YTBFeatures.HIDDEN_VIDEO_META_KEY]),
+            recentActions: YTBFeatures.mergeRecentActions(
+                stored.recentActions, r[YTBFeatures.RECENT_ACTIONS_KEY])
+        }));
+        // A copy still inside `data` must reach the separate keys on the next
+        // save, even though the page didn't change it.
+        const legacy = 'hiddenVideoMetadata' in stored || 'recentActions' in stored;
+        Object.assign(lastSplit, legacy ? { meta: null, actions: null } : splitSnapshot(record));
+        return record;
     }
 
     async function save(data) {
         const clean = normalize(data);
-        await api.storage.local.set({ [STORAGE_KEY]: clean });
+        if (!splitKeys().length) {
+            await api.storage.local.set({ [STORAGE_KEY]: clean });
+            return clean;
+        }
+        const { hiddenVideoMetadata, recentActions, ...record } = clean;
+        const items = { [STORAGE_KEY]: record };
+        const seen = splitSnapshot(clean);
+        if (seen.meta !== lastSplit.meta) items[YTBFeatures.HIDDEN_VIDEO_META_KEY] = hiddenVideoMetadata;
+        if (seen.actions !== lastSplit.actions) items[YTBFeatures.RECENT_ACTIONS_KEY] = recentActions;
+        await api.storage.local.set(items);
+        Object.assign(lastSplit, seen);
         return clean;
     }
 
@@ -569,11 +613,16 @@ const YTB = (function () {
              obj.settings));
     }
 
+    // A change can touch any of the three keys, and the joined record needs
+    // the ones it didn't carry, so each change re-reads them. Only the newest
+    // read is delivered.
     function onChanged(cb) {
+        const keys = [STORAGE_KEY, ...splitKeys()];
+        let latest = 0;
         api.storage.onChanged.addListener((changes, area) => {
-            if (area === 'local' && changes[STORAGE_KEY]) {
-                cb(normalize(changes[STORAGE_KEY].newValue));
-            }
+            if (area !== 'local' || !keys.some(key => changes[key])) return;
+            const request = ++latest;
+            load().then(record => { if (request === latest) cb(record); }).catch(() => {});
         });
     }
 

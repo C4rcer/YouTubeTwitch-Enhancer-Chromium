@@ -161,7 +161,8 @@ the separate SponsorBlock / DeArrow / Return YouTube Dislike extensions:
   via a separate heavier toggle, thumbnails) with community-submitted ones
   where they exist.
 - **Return YouTube Dislike.** Shows the crowdsourced dislike count on the
-  watch page's dislike button.
+  watch page's dislike button, plus your own dislike while it's pressed (the
+  extension only reads counts and never sends votes).
 
 **Data credits:** segment and title/thumbnail data by
 [SponsorBlock](https://sponsor.ajay.app) and
@@ -353,8 +354,9 @@ data, network requests, identifiers and retention controls.
   service-worker entry.
 - **`src/popup.*`**, **`src/options.*`** and **`src/twitch-options.*`** share
   storage helpers in **`src/common.js`**; settings and block lists live under
-  one `data` key, while watched history uses separate sharded local keys.
-  Contexts converge through `storage.onChanged`.
+  one `data` key, hidden-video details and undo history in their own keys
+  (`ytbHiddenVideoMeta`, `ytbRecentActions`), and watched history in
+  separate sharded local keys. Contexts converge through `storage.onChanged`.
 - Content-script instances are tagged with a per-load id and hand over via a
   takeover event, so in-place extension updates never leave orphaned handlers
   fighting the new version.

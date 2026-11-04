@@ -9,6 +9,8 @@ const vm = require('node:vm');
 
 function loadCommon() {
     const storage = {};
+    const writes = [];
+    const changeListeners = [];
     const context = {
         console,
         Blob: global.Blob,
@@ -18,13 +20,16 @@ function loadCommon() {
         browser: {
             storage: {
                 local: {
-                    async get(key) {
-                        if (typeof key === 'string') return { [key]: storage[key] };
-                        return {};
+                    async get(keys) {
+                        const list = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : [];
+                        return Object.fromEntries(list.map(key => [key, storage[key]]));
                     },
-                    async set(value) { Object.assign(storage, value); }
+                    async set(value) {
+                        writes.push(Object.keys(value));
+                        Object.assign(storage, value);
+                    }
                 },
-                onChanged: { addListener() {} }
+                onChanged: { addListener(fn) { changeListeners.push(fn); } }
             }
         }
     };
@@ -36,8 +41,11 @@ function loadCommon() {
     const commonSource = fs.readFileSync(
         path.join(__dirname, '..', 'src', 'common.js'), 'utf8');
     vm.runInContext(featureSource + '\n' + commonSource + '\n;globalThis.__YTB = YTB;', context);
-    return { YTB: context.__YTB, storage };
+    const emit = changes => changeListeners.forEach(fn => fn(changes, 'local'));
+    return { YTB: context.__YTB, storage, writes, emit };
 }
+
+const flush = () => new Promise(resolve => setImmediate(resolve));
 
 test('common normalization supplies and clamps the new feature schema', () => {
     const { YTB } = loadCommon();
@@ -159,4 +167,63 @@ test('feature-only backups are accepted as valid imports', () => {
     assert.equal(YTB.isValidPayload({ twitchPlayer: {} }), true);
     assert.equal(YTB.isValidPayload({ twitchChatOverlay: {} }), true);
     assert.equal(YTB.isValidPayload({ unrelated: true }), false);
+});
+
+test('pages see one record while hidden-video details and undo history live apart', async () => {
+    const { YTB, storage, writes } = loadCommon();
+    // A pre-4.8.7 record, plus entries a newer writer already put in the keys.
+    storage.data = {
+        settings: {},
+        hiddenVideoIds: ['legacyVid01', 'splitVideo1'],
+        hiddenVideoMetadata: { legacyVid01: { title: 'Legacy title', addedAt: 1 } },
+        recentActions: [{ id: 'shared', type: 'settings-change', label: 'Old copy', at: 1 }]
+    };
+    storage.ytbHiddenVideoMeta = { splitVideo1: { title: 'Split title', addedAt: 2 } };
+    storage.ytbRecentActions = [
+        { id: 'shared', type: 'settings-change', label: 'Newer copy', at: 1 },
+        { id: 'fresh', type: 'settings-change', label: 'Fresh', at: 2 }
+    ];
+
+    const data = await YTB.load();
+    assert.deepEqual(Object.keys(data.hiddenVideoMetadata).sort(), ['legacyVid01', 'splitVideo1']);
+    assert.deepEqual([...data.recentActions.map(action => action.id)], ['fresh', 'shared']);
+    assert.equal(data.recentActions[1].label, 'Newer copy', 'the separate key wins a duplicate');
+
+    // The first save after reading an old layout moves it out of `data`,
+    // even though the page didn't touch it.
+    await YTB.save(data);
+    assert.deepEqual(writes.at(-1).sort(), ['data', 'ytbHiddenVideoMeta', 'ytbRecentActions']);
+    assert.equal('hiddenVideoMetadata' in storage.data, false);
+    assert.equal('recentActions' in storage.data, false);
+    assert.deepEqual(Object.keys(storage.ytbHiddenVideoMeta).sort(), ['legacyVid01', 'splitVideo1']);
+    assert.equal(storage.ytbRecentActions.length, 2);
+
+    // A settings toggle no longer resends the bulky records to every tab.
+    data.settings.blockShorts = false;
+    await YTB.save(data);
+    assert.deepEqual(writes.at(-1), ['data']);
+
+    // Unhiding a video rewrites only the key it changed.
+    delete data.hiddenVideoMetadata.legacyVid01;
+    await YTB.save(data);
+    assert.deepEqual(writes.at(-1).sort(), ['data', 'ytbHiddenVideoMeta']);
+    assert.deepEqual(Object.keys(storage.ytbHiddenVideoMeta), ['splitVideo1']);
+});
+
+test('a change to a separate key still reaches open pages, joined', async () => {
+    const { YTB, storage, emit } = loadCommon();
+    storage.data = { settings: {}, hiddenVideoIds: ['newVideo01'] };
+    const seen = [];
+    YTB.onChanged(record => seen.push(record));
+
+    storage.ytbHiddenVideoMeta = { newVideo01: { title: 'Hidden in another tab', addedAt: 5 } };
+    emit({ ytbHiddenVideoMeta: { newValue: storage.ytbHiddenVideoMeta } });
+    await flush();
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].hiddenVideoMetadata.newVideo01.title, 'Hidden in another tab');
+    assert.deepEqual([...seen[0].hiddenVideoIds], ['newVideo01']);
+
+    emit({ ytbDiagnostics: { newValue: {} } });
+    await flush();
+    assert.equal(seen.length, 1, 'unrelated keys are ignored');
 });

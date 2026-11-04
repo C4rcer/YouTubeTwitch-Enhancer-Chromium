@@ -161,6 +161,8 @@ function loadContentHarness(watched, options = {}) {
         }
     } : null;
     const watchTitle = options.watchTitle || null;
+    // Optional mini-dom document: answers whatever the stubs below don't.
+    const dom = options.dom || null;
     const flexyData = options.flexyData || null;
     // Tests that pass playerData exercise the direct player path (a browser
     // exposing the page-world API); bridge tests use setElement + messages.
@@ -195,10 +197,11 @@ function loadContentHarness(watched, options = {}) {
                 if (selector.includes('yt-page-header-renderer')) return staleChannelDom.header;
                 if (selector.includes('link[rel="canonical"]')) return staleChannelDom.canonical;
             }
-            return null;
+            return dom ? dom.querySelector(selector) : null;
         },
-        querySelectorAll() { return []; },
-        getElementById(id) { return elements.get(id) || null; }
+        querySelectorAll(selector) { return dom ? dom.querySelectorAll(selector) : []; },
+        getElementById(id) { return elements.get(id) || null; },
+        createElement: tag => new (require('./mini-dom').MiniElement)(tag)
     };
 
     let revision = 0;
@@ -218,10 +221,36 @@ function loadContentHarness(watched, options = {}) {
         removeHidden() {}
     };
     const noopListener = { addListener() {} };
+    // Optional storage.local: each call settles a tick later, so two saves
+    // that are not serialized would interleave their reads and writes.
+    const storage = options.storage || null;
+    const local = storage ? {
+        async get(keys) {
+            await null;
+            const list = typeof keys === 'string' ? [keys] : keys;
+            return Object.fromEntries(list.map(key => [key, structuredClone(storage.values[key])]));
+        },
+        async set(items) {
+            await null;
+            storage.writes.push(Object.keys(items));
+            Object.assign(storage.values, structuredClone(items));
+        }
+    } : undefined;
+    // MutationObserver stand-in: mutate(target, attributeName) delivers a
+    // record to every observer watching that target.
+    const observers = [];
+    class FakeMutationObserver {
+        constructor(callback) { this.callback = callback; this.targets = new Set(); observers.push(this); }
+        observe(target) { this.targets.add(target); }
+        disconnect() { this.targets.clear(); }
+    }
+    const mutate = (target, attributeName) => observers
+        .filter(observer => observer.targets.has(target))
+        .forEach(observer => observer.callback([{ type: 'attributes', target, attributeName }]));
     const context = {
         browser: {
             runtime: { onMessage: noopListener },
-            storage: { onChanged: noopListener }
+            storage: { onChanged: noopListener, local }
         },
         document,
         location: { pathname: '/', search: '', href: 'https://www.youtube.com/', origin: 'https://www.youtube.com' },
@@ -249,7 +278,9 @@ function loadContentHarness(watched, options = {}) {
         },
         postMessage(message, origin) { postedMessages.push({ message, origin }); },
         confirm: () => true,
-        YTBWatchedDB: watchedDb
+        MutationObserver: FakeMutationObserver,
+        YTBWatchedDB: watchedDb,
+        YTBFeatures: storage ? require('../src/feature-core.js') : undefined
     };
     context.self = context;
     context.window = context;
@@ -261,6 +292,23 @@ function loadContentHarness(watched, options = {}) {
         isPaidBadgeText,
         processTiles(tiles, force = true) { processTiles(new Set(tiles), force, false); },
         processLegacyMutationFilters,
+        removeShortsSurfaces,
+        getTitleFromNode,
+        deTitleTarget,
+        getState() { return state; },
+        getSettings() { return settings; },
+        rebuildDerived,
+        setVolumeBoost,
+        rememberHiddenVideo,
+        saveOnly,
+        spyRunAll() {
+            let calls = 0;
+            runAll = () => { calls++; };
+            return () => calls;
+        },
+        isPendingWhileHidden() { return pendingWhileHidden; },
+        applyRydTo,
+        processRyd,
         prepareDeArrowTitleIdentity,
         applyDeArrowTitle,
         processDeArrowWatchPage,
@@ -319,6 +367,9 @@ function loadContentHarness(watched, options = {}) {
     return Object.assign(context.__YTB_FILTER_TEST__, {
         channelAttributions,
         postedMessages,
+        fire: (type, detail) => (listeners[type] || []).forEach(fn => fn({ type, detail })),
+        setHidden: value => { document.hidden = value; },
+        mutate,
         runLatestTimeout() {
             const ids = Array.from(timeouts.keys());
             const id = ids[ids.length - 1];
@@ -1312,4 +1363,272 @@ test('max quality waits until the player is on the video in the URL', () => {
     player.vid = 'nextVideo01';
     h.applyMaxQuality();
     assert.equal(player.preferred, 'hd2160');
+});
+
+const { h, createDocument } = require('./mini-dom');
+
+const SIDEBAR_TITLE = "SteamOS, Linux, & Microsoft's Valve-Sized Problem, ft. Wendell of Level1 Techs";
+
+// Watch-sidebar (compact) lockup as rendered live 2026-10: the metadata host's
+// own class contains "lockupMetadataViewModelTitle" (…TitleMaxLines3) and it
+// precedes the real title in document order.
+function sidebarLockup(videoId = 'tfVVngHbb4s') {
+    return h('yt-lockup-view-model', { class: 'lockup' },
+        h('a', { href: '/watch?v=' + videoId, class: 'ytLockupViewModelContentImage' }),
+        h('yt-lockup-metadata-view-model', {
+            class: 'ytLockupMetadataViewModelHost ytLockupMetadataViewModelHorizontal ' +
+                'ytLockupMetadataViewModelTitleMaxLines3 ytLockupMetadataViewModelCompact'
+        },
+        h('div', { class: 'ytLockupMetadataViewModelTextContainer' },
+            h('h3', {
+                class: 'ytLockupMetadataViewModelHeadingReset',
+                title: SIDEBAR_TITLE,
+                'aria-label': SIDEBAR_TITLE
+            },
+            h('a', { href: '/watch?v=' + videoId, class: 'ytLockupMetadataViewModelTitle' },
+                h('span', { class: 'yt-core-attributed-string' }, SIDEBAR_TITLE))),
+            h('div', { class: 'ytLockupMetadataViewModelMetadata' },
+                h('yt-content-metadata-view-model', {},
+                    h('span', { class: 'ytContentMetadataViewModelMetadataText' }, 'Gamers Nexus'),
+                    h('span', { class: 'ytContentMetadataViewModelMetadataText' }, '912K views'),
+                    h('span', { class: 'ytContentMetadataViewModelMetadataText' }, '4 days ago'))))));
+}
+
+test('compact sidebar lockups yield the title, not the whole metadata block', () => {
+    const api = loadContentHarness(new Set());
+    const lockup = sidebarLockup();
+
+    assert.equal(api.getTitleFromNode(lockup), SIDEBAR_TITLE);
+    const target = api.deTitleTarget(lockup);
+    assert.equal(target.localName, 'a');
+    assert.equal(target.className, 'ytLockupMetadataViewModelTitle',
+        'DeArrow must write to the title link, not the metadata host');
+
+    // A keyword that only appears in the byline must not hide the video;
+    // one from the title still does.
+    api.configure({ settings: { enabled: true }, blockedKeywords: ['nexus'] });
+    api.processTiles([lockup]);
+    assert.equal(lockup.classList.contains('ytb-removed'), false);
+
+    const other = sidebarLockup('otherVideo01');
+    api.configure({ settings: { enabled: true }, blockedKeywords: ['valve'] });
+    api.processTiles([other]);
+    assert.equal(other.dataset.ytbFilterReason, 'blocked-keyword');
+});
+
+// Search-results Shorts shelf as rendered live 2026-10.
+function searchShortsShelf() {
+    return h('grid-shelf-view-model', {},
+        h('yt-section-header-view-model', {},
+            h('yt-shelf-header-layout', {}, h('h2', {}, 'Shorts'))),
+        h('div', { class: 'ytGridShelfViewModelGridShelfRow' },
+            h('ytm-shorts-lockup-view-model-v2', {},
+                h('ytm-shorts-lockup-view-model', {},
+                    h('a', { href: '/shorts/shortvideo1' }))),
+            h('ytm-shorts-lockup-view-model-v2', {},
+                h('ytm-shorts-lockup-view-model', {},
+                    h('a', { href: '/shorts/shortvideo2' })))),
+        h('button-view-model', {}, h('button', {}, 'Show more')));
+}
+
+test('search-results Shorts shelves hide whole, header and Show more included', () => {
+    const shelf = searchShortsShelf();
+    const plainShelf = h('grid-shelf-view-model', {},
+        h('yt-section-header-view-model', {}, h('h2', {}, 'Latest from Example')),
+        h('ytd-video-renderer', {}, h('a', { href: '/watch?v=regular0001' })));
+    const section = h('ytd-item-section-renderer', {}, h('div', { id: 'contents' }, shelf, plainShelf));
+    const dom = createDocument(h('ytd-search', {}, section));
+
+    const api = loadContentHarness(new Set(), { dom });
+    api.configure({ settings: { enabled: true, blockShorts: true } });
+
+    // Pre-paint pass: the shelf is inserted, then its lockups render into it.
+    const lockups = shelf.children[1];
+    lockups.remove();
+    api.processLegacyMutationFilters([{
+        type: 'childList', target: section, addedNodes: [shelf], removedNodes: []
+    }]);
+    assert.equal(shelf.classList.contains('ytb-removed'), false,
+        'an empty grid shelf is not known to be Shorts yet');
+    shelf.insertBefore(lockups, shelf.children[1]);
+    api.processLegacyMutationFilters([{
+        type: 'childList', target: shelf, addedNodes: [lockups], removedNodes: []
+    }]);
+    assert.equal(shelf.classList.contains('ytb-removed'), true);
+    assert.equal(plainShelf.classList.contains('ytb-removed'), false);
+
+    // Maintenance pass over the whole page.
+    shelf.classList.remove('ytb-removed');
+    api.removeShortsSurfaces();
+    assert.equal(shelf.classList.contains('ytb-removed'), true);
+    assert.equal(plainShelf.classList.contains('ytb-removed'), false,
+        'a grid shelf without Shorts stays');
+});
+
+test('shared speed hotkeys feed the per-channel speed memory', () => {
+    const owner = h('ytd-video-owner-renderer', {},
+        h('a', { href: '/@gamersnexus' }, 'Gamers Nexus'));
+    const api = loadContentHarness(new Set(), { dom: createDocument(owner) });
+    api.configure({ settings: { enabled: true, ytSpeedPerChannel: true } });
+    api.setPath('/watch?v=tfVVngHbb4s');
+
+    api.fire('ytb-speed-action', { site: 'youtube', speed: 1.75 });
+    assert.equal(api.getState().ytChannelSpeeds['@gamersnexus'], 1.75);
+
+    api.fire('ytb-speed-action', { site: 'twitch', speed: 2 });
+    assert.equal(api.getState().ytChannelSpeeds['@gamersnexus'], 1.75,
+        'Twitch speed changes are not YouTube channel speeds');
+
+    api.fire('ytb-speed-action', { site: 'youtube', speed: 1 });
+    assert.equal('@gamersnexus' in api.getState().ytChannelSpeeds, false,
+        'returning to 1x forgets the channel speed');
+});
+
+test('a profile volume boost survives storage reloads until changed by hand', () => {
+    const api = loadContentHarness(new Set());
+    // No style-injecting features: the stub document cannot build <style>.
+    api.configure({ settings: {
+        enabled: true, volumeBoost: 1,
+        blockShorts: false, hideSidebarSpinner: false, hideEndScreen: false
+    } });
+
+    api.fire('ytb-apply-playback-profile', { site: 'youtube', speed: 1.5, volumeBoost: 2 });
+    assert.equal(api.getSettings().volumeBoost, 2);
+
+    // Any write to the shared record reloads settings from storage, where the
+    // base boost is still 1x: the session-scoped profile boost must hold.
+    api.rebuildDerived();
+    assert.equal(api.getSettings().volumeBoost, 2);
+    assert.equal(api.getState().settings.volumeBoost, 1, 'the profile boost is never saved');
+
+    api.setVolumeBoost(1);
+    api.rebuildDerived();
+    assert.equal(api.getSettings().volumeBoost, 1, 'a manual change replaces the profile boost');
+
+    api.fire('ytb-apply-playback-profile', { site: 'youtube', speed: 1.5, volumeBoost: 3 });
+    api.fire('ytb-apply-playback-profile', { site: 'youtube', speed: 1.5, volumeBoost: null });
+    api.rebuildDerived();
+    assert.equal(api.getSettings().volumeBoost, 1, 'a profile without a boost uses the base');
+});
+
+test('hidden-video details go to their own key, folded with an old in-record copy', async () => {
+    const storage = {
+        values: {
+            data: {
+                settings: { enabled: true },
+                hiddenVideoIds: ['legacyVid01'],
+                hiddenVideoMetadata: {
+                    legacyVid01: { title: 'Legacy title', channel: '', thumbnail: '', addedAt: 1 }
+                }
+            }
+        },
+        writes: []
+    };
+    const api = loadContentHarness(new Set(), { storage });
+    api.configure(storage.values.data);
+
+    // Two hides saved back to back. Each save reads the stored record first,
+    // so the two must not interleave and drop each other's details.
+    api.rememberHiddenVideo('firstVid001', sidebarLockup('firstVid001'), { name: 'Gamers Nexus' });
+    const first = api.saveOnly();
+    api.rememberHiddenVideo('secondVid01', sidebarLockup('secondVid01'), { name: 'Gamers Nexus' });
+    await Promise.all([first, api.saveOnly()]);
+
+    const meta = storage.values.ytbHiddenVideoMeta;
+    assert.deepEqual(Object.keys(meta).sort(), ['firstVid001', 'legacyVid01', 'secondVid01']);
+    assert.equal(meta.firstVid001.title, SIDEBAR_TITLE);
+    assert.equal(meta.firstVid001.channel, 'Gamers Nexus');
+    assert.equal(meta.legacyVid01.title, 'Legacy title');
+    assert.equal('hiddenVideoMetadata' in storage.values.data, false, 'the old copy left `data`');
+
+    // A save with no new details (a volume change, say) leaves the key alone.
+    await api.saveOnly();
+    assert.deepEqual(storage.writes.at(-1), ['data']);
+});
+
+test('caption updates inside the player do not queue a full page pass', () => {
+    const api = loadContentHarness(new Set());
+    const segment = h('span', { class: 'ytp-caption-segment' }, 'Hello');
+    const player = h('div', { id: 'movie_player' },
+        h('div', { class: 'ytp-caption-window-container' },
+            h('div', { class: 'caption-window' },
+                h('span', { class: 'captions-text' }, segment))));
+    createDocument(player);
+    const line = segment.parentElement;
+    assert.equal(api.mutationNeedsMaintenance([{
+        type: 'childList', target: line, addedNodes: [segment], removedNodes: []
+    }]), false);
+    const replaced = h('span', { class: 'ytp-caption-segment' }, 'Earlier line');
+    assert.equal(api.mutationNeedsMaintenance([{
+        type: 'childList', target: line, addedNodes: [], removedNodes: [replaced]
+    }]), false);
+
+    // End-screen suggestions inside the same player still get the page pass,
+    // which hides blocked channels there.
+    const endscreen = h('div', { class: 'html5-endscreen' });
+    player.appendChild(endscreen);
+    const still = h('a', { class: 'ytp-videowall-still', href: '/watch?v=endscreen01' });
+    endscreen.appendChild(still);
+    assert.equal(api.mutationNeedsMaintenance([{
+        type: 'childList', target: endscreen, addedNodes: [still], removedNodes: []
+    }]), true);
+});
+
+test('watched-history changes in a hidden tab wait until it is shown', () => {
+    const api = loadContentHarness(new Set());
+    api.configure({ settings: { enabled: true } });
+    const runAllCalls = api.spyRunAll();
+
+    api.setHidden(true);
+    api.fire('ytb-watched-db-change');
+    assert.equal(runAllCalls(), 0);
+    assert.equal(api.isPendingWhileHidden(), true, 'the visibility handler catches up later');
+
+    api.setHidden(false);
+    api.fire('ytb-watched-db-change');
+    assert.equal(runAllCalls(), 1);
+});
+
+// The watch page's dislike button as rendered live 2026-11 (icon-only, the
+// pressed state on the button's aria-pressed).
+function watchDislikeButton(pressed) {
+    const button = h('button', { 'aria-pressed': pressed ? 'true' : 'false', 'aria-label': 'Dislike this video' });
+    h('ytd-watch-metadata', {},
+        h('segmented-like-dislike-button-view-model', {},
+            h('dislike-button-view-model', {}, button)));
+    return button;
+}
+
+test('your own dislike shows in the Return YouTube Dislike count', () => {
+    const api = loadContentHarness(new Set());
+    const button = watchDislikeButton(false);
+    api.applyRydTo(button, 'rydVideo001', { dislikes: 11 });
+    assert.equal(button.querySelector('.ytb-ryd-count').textContent, '11');
+
+    // RYD never hears about this vote, so its count can't include it.
+    button.setAttribute('aria-pressed', 'true');
+    api.mutate(button, 'aria-pressed');
+    assert.equal(button.querySelector('.ytb-ryd-count').textContent, '12');
+    assert.match(button.getAttribute('title'), /^12 dislikes/);
+
+    // Taking it back, or liking instead, un-presses the button.
+    button.setAttribute('aria-pressed', 'false');
+    api.mutate(button, 'aria-pressed');
+    assert.equal(button.querySelector('.ytb-ryd-count').textContent, '11');
+});
+
+test('a count written before a reload still follows your vote', () => {
+    const button = watchDislikeButton(true);
+    // Stamped by an earlier add-on instance: no new lookup is made.
+    button.dataset.ytbRyd = 'rydVideo001';
+    button.dataset.ytbRydBase = '11';
+    const api = loadContentHarness(new Set(), { dom: createDocument(button.closest('ytd-watch-metadata')) });
+    api.configure({ settings: { enabled: true, rydEnabled: true } });
+    api.setPath('/watch?v=rydVideo001');
+    api.processRyd();
+    assert.equal(button.querySelector('.ytb-ryd-count').textContent, '12');
+
+    button.setAttribute('aria-pressed', 'false');
+    api.mutate(button, 'aria-pressed');
+    assert.equal(button.querySelector('.ytb-ryd-count').textContent, '11', 'and is watched from then on');
 });

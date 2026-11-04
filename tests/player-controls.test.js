@@ -24,12 +24,30 @@ function fakeClassList() {
 
 function buildHarness(data) {
     const listeners = new Map();
+    const owners = [];   // { owner, type, handler } for every live listener
     const elementsById = new Map();
     const rootChildren = [];
     const bodyChildren = [];
 
+    function listen(owner, type, handler) {
+        owners.push({ owner, type, handler });
+        if (!listeners.has(type)) listeners.set(type, []);
+        listeners.get(type).push(handler);
+    }
+
+    function unlisten(owner, type, handler) {
+        const index = owners.findIndex(item =>
+            item.owner === owner && item.type === type && item.handler === handler);
+        if (index >= 0) owners.splice(index, 1);
+        if (listeners.has(type)) {
+            listeners.set(type, listeners.get(type).filter(item => item !== handler));
+        }
+    }
+
     function element(tagName) {
         return {
+            addEventListener(type, handler) { listen(this, type, handler); },
+            removeEventListener(type, handler) { unlisten(this, type, handler); },
             tagName: String(tagName || 'div').toUpperCase(),
             dataset: {},
             style: {},
@@ -96,15 +114,8 @@ function buildHarness(data) {
     const document = {
         body: element('body'),
         activeElement: null,
-        addEventListener(type, handler) {
-            if (!listeners.has(type)) listeners.set(type, []);
-            listeners.get(type).push(handler);
-        },
-        removeEventListener(type, handler) {
-            if (listeners.has(type)) {
-                listeners.set(type, listeners.get(type).filter(item => item !== handler));
-            }
-        },
+        addEventListener(type, handler) { listen(document, type, handler); },
+        removeEventListener(type, handler) { unlisten(document, type, handler); },
         dispatchEvent(event) {
             for (const handler of listeners.get(event.type) || []) handler(event);
             return true;
@@ -215,8 +226,26 @@ function buildHarness(data) {
         return event;
     }
 
-    return { video, videoTarget, fire };
+    function changeData(newValue) {
+        for (const handler of storageListeners.slice()) handler({ data: { newValue } }, 'local');
+    }
+
+    const listenerOwners = type => owners.filter(item => item.type === type).map(item => item.owner);
+
+    return { video, videoTarget, player, document, fire, changeData, listenerOwners, on: document.addEventListener };
 }
+
+const settle = () => new Promise(resolve => setTimeout(resolve, 10));
+const bracketRight = {
+    code: 'BracketRight',
+    key: ']',
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    metaKey: false,
+    repeat: false,
+    isComposing: false
+};
 
 test('configured keyboard and wheel actions handle media and show conflicts nowhere at runtime', async () => {
     const harness = buildHarness({
@@ -281,4 +310,82 @@ test('configured shortcuts are ignored in editable targets', async () => {
         isComposing: false
     });
     assert.equal(harness.video.playbackRate, 1);
+});
+
+test('unrelated data writes keep a manual speed; profile edits re-apply', async () => {
+    const data = {
+        settings: { enabled: true, ytSpeedHotkeys: true, volumeBoost: 1 },
+        inputBindings: {
+            youtube: { enabled: true, keyboard: { speedUp: 'BracketRight' }, mouse: {}, wheel: {} }
+        },
+        playbackProfiles: [
+            { id: 'study', name: 'Study', sites: ['youtube'], speed: 1.5 }
+        ],
+        activePlaybackProfiles: { youtube: 'study', twitch: 'default' }
+    };
+    const harness = buildHarness(data);
+    await settle();
+    assert.equal(harness.video.playbackRate, 1.5);
+    let applied = 0;
+    harness.on('ytb-apply-playback-profile', () => { applied++; });
+
+    harness.fire('keydown', Object.assign({}, bracketRight));
+    assert.equal(harness.video.playbackRate, 1.75);
+
+    // A volume-boost save (or a hide in another tab) rewrites the record.
+    harness.changeData(Object.assign({}, data, {
+        settings: Object.assign({}, data.settings, { volumeBoost: 2 }),
+        hiddenVideoIds: ['abc']
+    }));
+    await settle();
+    assert.equal(harness.video.playbackRate, 1.75, 'the manual speed survives');
+    assert.equal(applied, 0, 'the profile is not re-run');
+
+    harness.changeData(Object.assign({}, data, {
+        playbackProfiles: [{ id: 'study', name: 'Study', sites: ['youtube'], speed: 1.25 }]
+    }));
+    await settle();
+    assert.equal(harness.video.playbackRate, 1.25, 'editing the profile applies it');
+    assert.equal(applied, 1);
+});
+
+test('speed hotkeys report each change for per-channel memory', async () => {
+    const harness = buildHarness({
+        settings: { enabled: true, ytSpeedHotkeys: true },
+        inputBindings: {
+            youtube: { enabled: true, keyboard: { speedUp: 'BracketRight' }, mouse: {}, wheel: {} }
+        }
+    });
+    await settle();
+    const reports = [];
+    harness.on('ytb-speed-action', event => reports.push(event.detail));
+    harness.fire('keydown', Object.assign({}, bracketRight));
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0].site, 'youtube');
+    assert.equal(reports[0].speed, 1.25);
+});
+
+test('a wheel listener exists only for configured wheel shortcuts, on the player', async () => {
+    const plain = buildHarness({ settings: { enabled: true } });
+    await settle();
+    assert.equal(plain.listenerOwners('wheel').length, 0,
+        'no wheel shortcut, so page scrolling never waits on this script');
+
+    const data = {
+        settings: { enabled: true },
+        inputBindings: {
+            youtube: { enabled: true, keyboard: {}, mouse: {}, wheel: { volumeUp: 'WheelUp' } }
+        }
+    };
+    const bound = buildHarness(data);
+    await settle();
+    const owners = bound.listenerOwners('wheel');
+    assert.equal(owners.length, 1);
+    assert.equal(owners[0], bound.player, 'scoped to the player, not the document');
+
+    bound.changeData(Object.assign({}, data, {
+        inputBindings: { youtube: { enabled: true, keyboard: {}, mouse: {}, wheel: {} } }
+    }));
+    await settle();
+    assert.equal(bound.listenerOwners('wheel').length, 0, 'removing the shortcut removes the listener');
 });

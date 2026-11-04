@@ -22,6 +22,7 @@ html[data-ytb-filter-boot] :is(
     ytd-rich-section-renderer,
     ytd-rich-shelf-renderer,
     ytd-reel-shelf-renderer,
+    grid-shelf-view-model,
     ytd-feed-nudge-renderer,
     ytd-emergency-onebox-renderer,
     ytd-ad-slot-renderer,

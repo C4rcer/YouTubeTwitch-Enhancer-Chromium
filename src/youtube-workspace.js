@@ -678,12 +678,18 @@
             }
             reconcileCollections();
             runtime.writeChain = runtime.writeChain.catch(() => {}).then(async () => {
-                const stored = await api.storage.local.get(STORAGE_KEY);
+                // Undo entries go to the history's own key (see feature-core.js).
+                const historyKey = actionLabel && typeof YTBFeatures !== 'undefined'
+                    ? YTBFeatures.RECENT_ACTIONS_KEY : '';
+                const stored = await api.storage.local.get(historyKey ? [STORAGE_KEY, historyKey] : STORAGE_KEY);
                 const full = Object.assign({}, asObject(stored && stored[STORAGE_KEY]));
                 full.ytCollections = normalizeCollections(runtime.collections);
-                if (actionLabel && typeof YTBFeatures !== 'undefined' &&
-                        (!full.settings || full.settings.recentActionsEnabled !== false)) {
-                    full.recentActions = YTBFeatures.addRecentAction(full.recentActions, {
+                const items = { [STORAGE_KEY]: full };
+                if (historyKey && (!full.settings || full.settings.recentActionsEnabled !== false)) {
+                    // Fold in any copy an older version left inside `data`.
+                    const history = YTBFeatures.mergeRecentActions(full.recentActions, stored[historyKey]);
+                    delete full.recentActions;
+                    items[historyKey] = YTBFeatures.addRecentAction(history, {
                         id: 'action-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7),
                         type: 'collection-change', label: actionLabel,
                         before: { ytCollections: beforeCollections },
@@ -691,7 +697,7 @@
                         expiresAt: Date.now() + 7 * 86400000
                     });
                 }
-                await api.storage.local.set({ [STORAGE_KEY]: full });
+                await api.storage.local.set(items);
                 return full.ytCollections;
             }).catch(error => {
                 console.warn('[YTB workspace] Could not save collections:', error);

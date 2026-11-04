@@ -644,23 +644,73 @@
     const IS_INVENTORY = !IS_CLIPS_HOST && !IS_MOBILE &&
         location.pathname.startsWith('/drops/inventory');
     const AUTOCLAIM_HASH = '#ytbtw-autoclaim';
+    // An auto-claim tab closes once its clicks have had time to go out (no new
+    // claim for CLOSE_AFTER_CLAIM_MS), or after GIVE_UP_MS with nothing to
+    // claim. The inventory renders seconds after this script's first pass, so
+    // the clock never starts at that first, empty pass.
+    const INVENTORY_CLOSE_AFTER_CLAIM_MS = 6000;
+    const INVENTORY_GIVE_UP_MS = 30000;
+    const INVENTORY_MAX_OPEN_MS = 60000;
     let lastMomentClaimAt = 0;
     let lastBgClaimAt = 0;
     let dropWasClaimable = false;
-    let inventoryCloseArmed = false;
+    let inventoryArmedAt = 0;
+    let inventoryLastClaimAt = 0;
+
+    // The inventory's "Claim Now" button label in every Twitch UI language,
+    // taken from Twitch's own locale bundles (key "[DropsCampaignInProgress
+    // RewardComponent] Claim Now", fetched 2026-10). Exact "claim" is the
+    // early-2026-07 styled link. Translations of the bare word "Claim" are
+    // left out on purpose: in several languages they double as "Redeem" or
+    // "Download", so an unknown label fails closed.
+    const DROP_CLAIM_LABELS = new Set([
+        'claim', 'claim now',       // en
+        'المطالبة الآن',            // ar
+        'взимане сега',             // bg
+        'vyzvednout kořist',        // cs
+        'gør krav på det nu',       // da
+        'jetzt abholen',            // de
+        'διεκδίκηση τώρα',          // el
+        'reclamar ahora',           // es, es-mx
+        'lunasta nyt',              // fi
+        'en profiter',              // fr
+        'kiváltás most!',           // hu
+        'riscuoti subito',          // it
+        '今すぐ入手',                // ja
+        '지금 받기',                 // ko
+        'claim nu',                 // nl
+        'hent nå',                  // no
+        'odbierz teraz',            // pl
+        'resgate agora',            // pt-br
+        'resgatar agora',           // pt
+        'solicită acum',            // ro
+        'получить сейчас',          // ru
+        'vyzdvihnúť teraz',         // sk
+        'hämta nu',                 // sv
+        'เคลมตอนนี้',                // th
+        'şimdi al',                 // tr
+        'забрати зараз',            // uk
+        'nhận ngay',                // vi
+        '现在领取',                  // zh-cn
+        '立即領取'                   // zh-tw
+    ]);
+
+    function isDropClaimLabel(text) {
+        return DROP_CLAIM_LABELS.has((text || '').replace(/\s+/g, ' ').trim().toLowerCase());
+    }
 
     // Claim every claim control on the current inventory page (styled <a>
-    // or <button>, exact text "Claim" / "Claim Now", not disabled).
+    // or <button>, a known claim label or stable attribute, not disabled).
     // Returns how many were clicked.
     function claimInventoryHere() {
         const els = [...document.querySelectorAll(
             'main a[data-a-target*="claim" i], main button[data-a-target*="claim" i], ' +
             'main a[data-test-selector*="claim" i], main button[data-test-selector*="claim" i], ' +
-            'a.ScCoreButton-sc-ocjdkq-0, main a, main button'
+            'main a, main button'
         )].filter(b => {
             const stable = ((b.getAttribute('data-a-target') || '') + ' ' +
                 (b.getAttribute('data-test-selector') || '')).toLowerCase().includes('claim');
-            return (stable || /^claim( now)?$/i.test((b.textContent || '').trim())) && !b.disabled &&
+            return (stable || isDropClaimLabel(b.textContent)) && !b.disabled &&
                 b.getAttribute('href') !== '/drops/inventory';
         });
         let n = 0;
@@ -686,17 +736,29 @@
         return false;
     }
 
+    // Only for a tab the background script opened to auto-claim (see init).
+    function maybeCloseInventoryTab() {
+        if (!inventoryArmedAt) return;
+        const now = Date.now();
+        const settled = inventoryLastClaimAt
+            ? now - inventoryLastClaimAt >= INVENTORY_CLOSE_AFTER_CLAIM_MS
+            : now - inventoryArmedAt >= INVENTORY_GIVE_UP_MS;
+        if (!settled && now - inventoryArmedAt < INVENTORY_MAX_OPEN_MS) return;
+        inventoryArmedAt = 0;
+        // The user switched to the tab while it worked: it's theirs now.
+        if (!document.hidden) return;
+        api.runtime.sendMessage({ action: 'ytbtw-close-self' }).catch(() => {});
+    }
+
     function autoClaimDrops() {
         if (!settings.twEnabled || !settings.twAutoClaimDrops) return;
         if (IS_INVENTORY) {
             const n = claimInventoryHere();
-            if (n) toast('Claimed drop', '');
-            // If we were opened purely to auto-claim, close once we've had a
-            // moment to fire the click(s) and let the request go out.
-            if (inventoryCloseArmed) {
-                inventoryCloseArmed = false;
-                setTimeout(() => api.runtime.sendMessage({ action: 'ytbtw-close-self' }).catch(() => {}), 6000);
+            if (n) {
+                toast('Claimed drop', '');
+                inventoryLastClaimAt = Date.now();
             }
+            maybeCloseInventoryTab();
             return;
         }
         // Non-inventory page: trigger a background claim. Twitch leaves the
@@ -1315,13 +1377,29 @@
         return pageChannelId;
     }
 
+    // A provider that accepts the connection and never answers must not hold
+    // back the others (verified 2026-10: api.frankerfacez.com hung for 45 s+
+    // while BTTV answered in 63 ms).
+    const EMOTE_FETCH_TIMEOUT_MS = 8000;
+
     async function fetchJson(url) {
         // Content-script fetches on Chromium run under the page's CORS and
         // CSP rules; the background service worker holds host permissions
         // for the three emote APIs, so the request is relayed there.
-        const res = await api.runtime.sendMessage({ action: 'ytb-fetch-json', url });
-        if (!res || !res.ok) throw new Error((res && res.error) || 'fetch failed');
-        return res.data;
+        let timer = null;
+        const timeout = new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('timeout')), EMOTE_FETCH_TIMEOUT_MS);
+        });
+        try {
+            const res = await Promise.race([
+                api.runtime.sendMessage({ action: 'ytb-fetch-json', url }),
+                timeout
+            ]);
+            if (!res || !res.ok) throw new Error((res && res.error) || 'fetch failed');
+            return res.data;
+        } finally {
+            clearTimeout(timer);
+        }
     }
 
     function addEmote(map, name, url, title, scope) {
@@ -1357,41 +1435,56 @@
         const id = getChannelId();
         if (emoteGlobalsLoaded && (id === emoteChannelId || !id)) return;
         emoteFetchInFlight = true;
-        (async () => {
+        // Precedence order: channel emotes win over same-named globals, then
+        // BTTV, 7TV, FFZ. Every answer is published as it arrives, so one slow
+        // provider never holds back the rest.
+        const sources = [];
+        if (id) {
+            sources.push(
+                ['https://api.betterttv.net/3/cached/users/twitch/' + id, (map, d) =>
+                    collectBttv(map, [].concat(d.channelEmotes || [], d.sharedEmotes || []), 'channel')],
+                ['https://7tv.io/v3/users/twitch/' + id, (map, d) =>
+                    collect7tv(map, d && d.emote_set && d.emote_set.emotes, 'channel')],
+                ['https://api.frankerfacez.com/v1/room/id/' + id, (map, d) =>
+                    collectFfz(map, d, 'channel')]
+            );
+        }
+        sources.push(
+            ['https://api.betterttv.net/3/cached/emotes/global', (map, list) =>
+                collectBttv(map, list, 'global')],
+            ['https://7tv.io/v3/emote-sets/global', (map, d) =>
+                collect7tv(map, d && d.emotes, 'global')],
+            ['https://api.frankerfacez.com/v1/set/global', (map, d) =>
+                collectFfz(map, d, 'global')]
+        );
+        const parts = sources.map(() => null);
+        const publish = () => {
             const map = new Map();
-            // Channel emotes load first so they win over same-named globals.
-            if (id) {
-                await Promise.allSettled([
-                    fetchJson('https://api.betterttv.net/3/cached/users/twitch/' + id)
-                        .then(d => { collectBttv(map, [].concat(d.channelEmotes || [], d.sharedEmotes || []), 'channel'); }),
-                    fetchJson('https://7tv.io/v3/users/twitch/' + id)
-                        .then(d => { collect7tv(map, d && d.emote_set && d.emote_set.emotes, 'channel'); }),
-                    fetchJson('https://api.frankerfacez.com/v1/room/id/' + id)
-                        .then(d => { collectFfz(map, d, 'channel'); })
-                ]);
+            for (const part of parts) {
+                if (part) part.forEach((emote, name) => { if (!map.has(name)) map.set(name, emote); });
             }
-            await Promise.allSettled([
-                fetchJson('https://api.betterttv.net/3/cached/emotes/global')
-                    .then(list => { collectBttv(map, list, 'global'); }),
-                fetchJson('https://7tv.io/v3/emote-sets/global')
-                    .then(d => { collect7tv(map, d && d.emotes, 'global'); }),
-                fetchJson('https://api.frankerfacez.com/v1/set/global')
-                    .then(d => { collectFfz(map, d, 'global'); })
-            ]);
             emoteMap = map;
+            if (chatContainer) {
+                chatContainer.querySelectorAll('.chat-line__message').forEach(m => emoteProcess(m, true));
+            }
+        };
+        Promise.allSettled(sources.map(([url, collect], i) => fetchJson(url).then(data => {
+            const part = new Map();
+            collect(part, data);
+            parts[i] = part;
+            if (part.size) publish();
+        }))).then(() => {
             emoteChannelId = id;
-            if (map.size) {
+            if (parts.some(part => part && part.size)) {
                 emoteGlobalsLoaded = true;
                 emoteLastFailAt = 0;
             } else {
                 // Every provider failed (network / permissions) — retry later.
+                publish();
                 emoteGlobalsLoaded = false;
                 emoteLastFailAt = Date.now();
             }
-            if (chatContainer) {
-                chatContainer.querySelectorAll('.chat-line__message').forEach(m => emoteProcess(m, true));
-            }
-        })().catch(() => {}).finally(() => { emoteFetchInFlight = false; });
+        }).catch(() => {}).finally(() => { emoteFetchInFlight = false; });
     }
 
     function emoteProcess(node, force) {
@@ -1402,30 +1495,33 @@
         for (const msg of msgs) {
             for (const frag of msg.querySelectorAll('[data-a-target="chat-message-text"]')) {
                 if (frag.dataset.ytbtwEmoted && !force) continue;
-                if (frag.querySelector('img.ytbtw-emote')) continue;   // already rewritten
-                const text = frag.textContent || '';
-                const tokens = text.split(/(\s+)/);
-                if (!tokens.some(t => emoteMap.has(t))) {
-                    frag.dataset.ytbtwEmoted = '1';
-                    continue;
-                }
-                const repl = document.createDocumentFragment();
-                for (const t of tokens) {
-                    const hit = emoteMap.get(t);
-                    if (hit) {
-                        const img = document.createElement('img');
-                        img.className = 'ytbtw-emote';
-                        img.src = hit.url;
-                        img.alt = t;
-                        img.title = hit.title;
-                        repl.appendChild(img);
-                    } else {
-                        repl.appendChild(document.createTextNode(t));
-                    }
-                }
-                frag.textContent = '';
-                frag.appendChild(repl);
                 frag.dataset.ytbtwEmoted = '1';
+                // Rewrite text nodes in place rather than the whole fragment, so
+                // a provider that answers later can still add its emotes beside
+                // ones already rendered. Re-runs are no-ops: rendered emotes are
+                // images, not text.
+                const walker = document.createTreeWalker(frag, NodeFilter.SHOW_TEXT);
+                const texts = [];
+                while (walker.nextNode()) texts.push(walker.currentNode);
+                for (const textNode of texts) {
+                    const tokens = textNode.data.split(/(\s+)/);
+                    if (!tokens.some(t => emoteMap.has(t))) continue;
+                    const repl = document.createDocumentFragment();
+                    for (const t of tokens) {
+                        const hit = emoteMap.get(t);
+                        if (hit) {
+                            const img = document.createElement('img');
+                            img.className = 'ytbtw-emote';
+                            img.src = hit.url;
+                            img.alt = t;
+                            img.title = hit.title;
+                            repl.appendChild(img);
+                        } else {
+                            repl.appendChild(document.createTextNode(t));
+                        }
+                    }
+                    textNode.parentNode.replaceChild(repl, textNode);
+                }
             }
         }
     }
@@ -1826,31 +1922,13 @@
 
     /* ==================================================================
      * 6f. Stream uptime chip next to the viewer count.
-     * The start time comes from the page itself: the SSR LD+JSON block on a
-     * full load, falling back to the Apollo cache reached through a React
-     * fiber (same page-world plumbing as the chat editor). Best-effort —
-     * when neither yields a time, no chip is shown.
+     * The start time comes from the Apollo cache reached through a React
+     * fiber (same page-world plumbing as the chat editor). The SSR LD+JSON
+     * block no longer carries it (verified live 2026-10: an @graph
+     * ProfilePage without `publication`). Best-effort — when the cache
+     * yields no time, no chip is shown.
      * ================================================================== */
     let uptimeCache = { login: null, start: 0, at: 0 };
-
-    function streamStartFromLdJson(login) {
-        for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
-            try {
-                const data = JSON.parse(s.textContent);
-                for (const d of (Array.isArray(data) ? data : [data])) {
-                    if (!d || !d.publication) continue;
-                    // Stale after SPA navigation: only trust it for its channel.
-                    if (!JSON.stringify(d).toLowerCase().includes('twitch.tv/' + login)) continue;
-                    const pubs = Array.isArray(d.publication) ? d.publication : [d.publication];
-                    for (const p of pubs) {
-                        const t = p && p.startDate && Date.parse(p.startDate);
-                        if (t) return t;
-                    }
-                }
-            } catch (e) { /* not JSON we understand */ }
-        }
-        return 0;
-    }
 
     // The stream start time sits in Twitch's Apollo cache, reachable only
     // from the page world; page-twitch.js walks the fiber tree there and
@@ -1895,11 +1973,7 @@
         }
         const maxAge = uptimeCache.start ? 300000 : 5000;
         if (uptimeCache.login !== login || Date.now() - uptimeCache.at > maxAge) {
-            uptimeCache = {
-                login,
-                start: streamStartFromLdJson(login) || streamStartFromApollo(login),
-                at: Date.now()
-            };
+            uptimeCache = { login, start: streamStartFromApollo(login), at: Date.now() };
         }
         if (!uptimeCache.start || uptimeCache.start > Date.now()) {
             if (existing) existing.remove();
@@ -2390,9 +2464,9 @@
             return;
         }
         // Opened by the background script purely to auto-claim drops: this
-        // instance claims and then asks to be closed (see autoClaimDrops).
+        // instance claims and then asks to be closed (see maybeCloseInventoryTab).
         if (IS_INVENTORY && location.hash === AUTOCLAIM_HASH) {
-            inventoryCloseArmed = true;
+            inventoryArmedAt = Date.now();
         }
         rebuildDerived();
         bootObserver();

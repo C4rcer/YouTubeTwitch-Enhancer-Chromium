@@ -92,7 +92,6 @@
     /* ---- live state ------------------------------------------------ */
     let state = {
         hiddenVideoIds: [],
-        hiddenVideoMetadata: {},
         blockedChannels: [],
         blockedKeywords: [],
         ytCommentKeywords: [],
@@ -102,6 +101,14 @@
         settings: Object.assign({}, DEFAULT_SETTINGS)
     };
     let settings = Object.assign({}, DEFAULT_SETTINGS);
+    // A playback profile's volume boost: session-scoped, so it outlives storage
+    // reloads of `settings` but is never saved (see onPlaybackProfile).
+    let profileVolumeBoost = null;
+    // Hidden-video details (title, channel, thumbnail for the options page)
+    // live in their own storage key and are never read here, so changes queue
+    // up and the next saveOnly() applies them to the stored copy.
+    let pendingHiddenMeta = new Map();   // video id -> details, or null to forget
+    let clearHiddenMeta = false;
     let sharedInputActionsEnabled = false;
     let hiddenSet = new Set();
     let keywordMatchers = [];   // compiled from state.blockedKeywords
@@ -255,12 +262,29 @@
         'ytm-statement-banner-renderer'
     ].join(',');
 
+    // Search results group Shorts in a generic grid-shelf-view-model (a "Shorts"
+    // section header, the Shorts lockups, then a "Show more" button; verified
+    // live 2026-10). The element is not Shorts-specific, so a shelf only counts
+    // once it holds Shorts.
+    const GRID_SHELF = 'grid-shelf-view-model';
+    const GRID_SHELF_SHORTS = [
+        'ytm-shorts-lockup-view-model',
+        'ytm-shorts-lockup-view-model-v2',
+        'a[href^="/shorts/"]'
+    ].join(',');
+
+    function isShortsGridShelf(el) {
+        return !!(el && el.matches && el.matches(GRID_SHELF) &&
+            el.querySelector(GRID_SHELF_SHORTS));
+    }
+
     // Non-tile shelves and promos still use their older dedicated passes.
     const LEGACY_MUTATION_CONTAINERS = [
         'ytd-rich-section-renderer',
         'ytd-rich-shelf-renderer',
         'ytd-reel-shelf-renderer',
         'ytm-reel-shelf-renderer',
+        GRID_SHELF,
         NON_VIDEO_CARDS
     ].join(',');
 
@@ -384,7 +408,9 @@
         ytm-pivot-bar-item-renderer:has([tab-identifier="pivot-shorts"]),
         ytm-pivot-bar-item-renderer:has(a[href^="/shorts"]),
         ytm-reel-shelf-renderer,
-        ytm-rich-section-renderer:has(ytm-reel-shelf-renderer) {
+        ytm-rich-section-renderer:has(ytm-reel-shelf-renderer),
+        grid-shelf-view-model:has(ytm-shorts-lockup-view-model-v2),
+        grid-shelf-view-model:has(ytm-shorts-lockup-view-model) {
             display: none !important;
         }
     `;
@@ -433,10 +459,6 @@
         d = d || {};
         return {
             hiddenVideoIds: Array.isArray(d.hiddenVideoIds) ? [...new Set(d.hiddenVideoIds)] : [],
-            hiddenVideoMetadata: (d.hiddenVideoMetadata && typeof d.hiddenVideoMetadata === 'object' &&
-                                  !Array.isArray(d.hiddenVideoMetadata))
-                ? Object.fromEntries(Object.entries(d.hiddenVideoMetadata).slice(0, 2000))
-                : {},
             blockedChannels: Array.isArray(d.blockedChannels)
                 ? d.blockedChannels.filter(c => c && (c.handle || c.channelId || c.name))
                 : [],
@@ -494,6 +516,7 @@
             if (c.name) sbWhitelistIndex.names.add(c.name.toLowerCase().trim());
         }
         settings = Object.assign({}, DEFAULT_SETTINGS, state.settings);
+        if (profileVolumeBoost != null) settings.volumeBoost = profileVolumeBoost;
         sharedInputActionsEnabled = typeof YTBFeatures !== 'undefined' &&
             YTBFeatures.normalizeInputBindings(state.inputBindings).youtube.enabled;
         compileKeywords();
@@ -560,22 +583,52 @@
     // Persist without re-running the full pass (used by enrichment inside
     // runAll). Load-merge-save: this script only owns the YouTube fields, so
     // pull the full record first rather than clobbering the Twitch lists.
-    async function saveOnly() {
+    // Writes run one at a time: each loads the stored record first, so two at
+    // once could drop each other's queued hidden-video details.
+    let saveChain = Promise.resolve();
+    function saveOnly() {
+        saveChain = saveChain.then(writeState);
+        return saveChain;
+    }
+
+    async function writeState() {
         if (retired) return;
+        const metaOps = pendingHiddenMeta;
+        const metaClear = clearHiddenMeta;
+        const metaKey = typeof YTBFeatures !== 'undefined' ? YTBFeatures.HIDDEN_VIDEO_META_KEY : '';
+        const writeMeta = !!metaKey && (metaClear || metaOps.size > 0);
+        pendingHiddenMeta = new Map();
+        clearHiddenMeta = false;
         try {
-            const stored = await api.storage.local.get(STORAGE_KEY);
+            const stored = await api.storage.local.get(writeMeta ? [STORAGE_KEY, metaKey] : STORAGE_KEY);
             const full = stored[STORAGE_KEY] || {};
             full.hiddenVideoIds = state.hiddenVideoIds;
-            full.hiddenVideoMetadata = state.hiddenVideoMetadata;
             full.blockedChannels = state.blockedChannels;
             full.blockedKeywords = state.blockedKeywords;
             full.ytCommentKeywords = state.ytCommentKeywords;
             full.ytChannelSpeeds = state.ytChannelSpeeds;
             full.sbWhitelist = state.sbWhitelist;
             full.settings = Object.assign({}, full.settings, state.settings);
+            const items = { [STORAGE_KEY]: full };
+            if (writeMeta) {
+                // Fold in any copy an older version left inside `data`.
+                const meta = metaClear ? {} : YTBFeatures.mergeHiddenVideoMetadata(
+                    full.hiddenVideoMetadata, stored[metaKey]);
+                delete full.hiddenVideoMetadata;
+                for (const [id, details] of metaOps) {
+                    if (details) meta[id] = details;
+                    else delete meta[id];
+                }
+                items[metaKey] = YTBFeatures.mergeHiddenVideoMetadata(meta);
+            }
             lastSerialized = JSON.stringify(normalize(full));
-            await api.storage.local.set({ [STORAGE_KEY]: full });
+            await api.storage.local.set(items);
         } catch (e) {
+            // Put the detail changes back; anything queued since is newer.
+            for (const [id, details] of metaOps) {
+                if (!pendingHiddenMeta.has(id)) pendingHiddenMeta.set(id, details);
+            }
+            if (metaClear) clearHiddenMeta = true;
             console.warn('[YT Blocker] Could not persist:', e);
         }
     }
@@ -792,15 +845,29 @@
         return /\d{1,3}[KMB]?\s*views/i.test(t) || STATS_WORDS.test(t);
     }
 
-    // Video title from a tile, for keyword blocking. Tries the classic
-    // renderers first, then the newer lockup view-models, then any heading.
+    // Lockup title elements, minus the metadata host: on compact (sidebar)
+    // lockups the host itself carries ytLockupMetadataViewModelTitleMaxLines3,
+    // and its text is title + channel + views + age (verified live 2026-10).
+    const LOCKUP_TITLE_LINK = 'a[class*="lockupMetadataViewModelTitle" i]';
+    const LOCKUP_TITLE_ANY = '[class*="lockupMetadataViewModelTitle" i]' +
+        ':not(yt-lockup-metadata-view-model)';
+
+    // Video title from a tile, for keyword blocking. Queried in priority tiers
+    // (querySelector returns document order, not selector order): the classic
+    // renderers, the lockup heading's title attribute, the lockup title link,
+    // then any heading.
+    const TITLE_TIERS = [
+        '#video-title, a#video-title-link',
+        'h3[title]',
+        LOCKUP_TITLE_LINK,
+        LOCKUP_TITLE_ANY,
+        'h3 a[title], h3, h4'
+    ];
+
     function getTitleFromNode(node) {
-        const el = node.querySelector(
-            '#video-title, a#video-title-link, ' +
-            '[class*="lockupMetadataViewModelTitle" i], ' +
-            'h3 a[title], h3, h4'
-        );
-        if (el) {
+        for (const selector of TITLE_TIERS) {
+            const el = node.querySelector(selector);
+            if (!el) continue;
             const t = cleanText(el.getAttribute && el.getAttribute('title') || el.textContent);
             if (t) return t;
         }
@@ -1039,6 +1106,9 @@
             'ytm-reel-shelf-renderer:not(.ytb-removed)',
             'ytm-reel-item-renderer:not(.ytb-removed)'
         ].join(',')).forEach(hideEl);
+        document.querySelectorAll(GRID_SHELF + ':not(.ytb-removed)').forEach(shelf => {
+            if (isShortsGridShelf(shelf)) hideEl(shelf);
+        });
         document.querySelectorAll('a[href*="/shorts/"]').forEach(a => {
             const cell = a.closest(OUTER_GRID_CELLS) || a.closest('yt-lockup-view-model');
             if (cell && !cell.classList.contains('ytb-removed')) hideEl(cell);
@@ -2494,7 +2564,8 @@
         // LINK. Never the bare h3 heading-reset wrapper — it computes to
         // black, so writing text there leaves it dark and unreadable.
         return node.querySelector('#video-title, a#video-title-link') ||
-               node.querySelector('a[class*="lockupMetadataViewModelTitle" i], [class*="lockupMetadataViewModelTitle" i]') ||
+               node.querySelector(LOCKUP_TITLE_LINK) ||
+               node.querySelector(LOCKUP_TITLE_ANY) ||
                node.querySelector('h3 a[title], h4');
     }
 
@@ -3231,35 +3302,65 @@
         )];
     }
 
+    // RYD's count can never include your own dislike: this add-on only reads
+    // counts and never sends votes. So, like the official extension's local
+    // +1, the shown count adds one while your dislike is pressed, and drops it
+    // again when you take it back or like instead (verified live 2026-11:
+    // the pressed state is the button's aria-pressed).
+    let rydPressObserver = null;
+    const rydObserved = new WeakSet();
+
+    function watchRydPress(b) {
+        if (rydObserved.has(b) || typeof MutationObserver === 'undefined') return;
+        if (!rydPressObserver) {
+            rydPressObserver = new MutationObserver(records => {
+                if (retired) return;
+                records.forEach(record => renderRydCount(record.target));
+            });
+        }
+        rydObserved.add(b);
+        rydPressObserver.observe(b, { attributes: true, attributeFilter: ['aria-pressed'] });
+    }
+
     function applyRydTo(b, vid, res) {
         b.dataset.ytbRyd = vid;
-        const label = formatCount(res.dislikes);
-        const txt = b.querySelector('.yt-spec-button-shape-next__button-text-content');
-        if (txt) {
-            txt.textContent = label;
-        } else {
-            // Icon-only button: append a count and widen it. YouTube pins the
-            // button AND its view-model wrappers to a fixed width with
-            // higher-specificity !important rules, so inline styles it is
-            // (verified live 2026-07: stylesheet width:auto!important lost).
-            let span = b.querySelector('.ytb-ryd-count');
-            if (!span) {
-                span = document.createElement('span');
-                span.className = 'ytb-ryd-count';
-                b.appendChild(span);
-            }
-            span.textContent = label;
-            b.classList.add('ytb-ryd-btn');
-            b.style.setProperty('padding-right', '16px', 'important');
-            const stop = b.closest('segmented-like-dislike-button-view-model');
-            let el = b;
-            while (el && stop && el !== stop) {
-                el.style.setProperty('width', 'auto', 'important');
-                el = el.parentElement;
-            }
-            if (!stop) b.style.setProperty('width', 'auto', 'important');
+        b.dataset.ytbRydBase = String(res.dislikes);
+        renderRydCount(b);
+        watchRydPress(b);
+        if (b.querySelector('.yt-spec-button-shape-next__button-text-content')) return;
+        // Icon-only button: widen it for the appended count. YouTube pins the
+        // button AND its view-model wrappers to a fixed width with
+        // higher-specificity !important rules, so inline styles it is
+        // (verified live 2026-07: stylesheet width:auto!important lost).
+        b.classList.add('ytb-ryd-btn');
+        b.style.setProperty('padding-right', '16px', 'important');
+        const stop = b.closest('segmented-like-dislike-button-view-model');
+        let el = b;
+        while (el && stop && el !== stop) {
+            el.style.setProperty('width', 'auto', 'important');
+            el = el.parentElement;
         }
-        b.title = res.dislikes.toLocaleString() + ' dislikes — Return YouTube Dislike';
+        if (!stop) b.style.setProperty('width', 'auto', 'important');
+    }
+
+    function renderRydCount(b) {
+        const base = Number(b.dataset.ytbRydBase);
+        if (!b.dataset.ytbRyd || !Number.isFinite(base)) return;
+        const count = base + (b.getAttribute('aria-pressed') === 'true' ? 1 : 0);
+        const label = formatCount(count);
+        let target = b.querySelector('.yt-spec-button-shape-next__button-text-content');
+        if (!target) {
+            // Icon-only button: the count goes in a span of our own.
+            target = b.querySelector('.ytb-ryd-count');
+            if (!target) {
+                target = document.createElement('span');
+                target.className = 'ytb-ryd-count';
+                b.appendChild(target);
+            }
+        }
+        if (target.textContent !== label) target.textContent = label;
+        const title = count.toLocaleString() + ' dislikes — Return YouTube Dislike';
+        if (b.title !== title) b.title = title;
     }
 
     let rydPendingVid = null;
@@ -3268,6 +3369,12 @@
         const vid = watchVideoId();
         if (!vid || rydPendingVid === vid) return;
         const btns = dislikeButtons();
+        // Buttons already showing this video's count (possibly written by an
+        // earlier add-on instance) still need watching for your own vote.
+        btns.filter(b => b.dataset.ytbRyd === vid).forEach(b => {
+            renderRydCount(b);
+            watchRydPress(b);
+        });
         if (!btns.length || btns.every(b => b.dataset.ytbRyd === vid)) return;
         rydPendingVid = vid;
         api.runtime.sendMessage({ action: 'ytb-ryd-votes', videoId: vid }).then((res) => {
@@ -3394,22 +3501,18 @@
         if (!id) return;
         const image = node && node.querySelector &&
             node.querySelector('img[src], img[data-thumb], yt-image img');
-        state.hiddenVideoMetadata[id] = {
+        // Bounded to the newest 2000 when written (see writeState).
+        pendingHiddenMeta.set(id, {
             title: node ? getTitleFromNode(node) : '',
             channel: channel && (channel.name || channel.handle || channel.channelId) || '',
             thumbnail: image && (image.currentSrc || image.src) || '',
             addedAt: Date.now()
-        };
-        const entries = Object.entries(state.hiddenVideoMetadata);
-        if (entries.length > 2000) {
-            entries.sort((a, b) => (b[1].addedAt || 0) - (a[1].addedAt || 0));
-            state.hiddenVideoMetadata = Object.fromEntries(entries.slice(0, 2000));
-        }
+        });
     }
     function undoHideVideo(id) {
         const i = state.hiddenVideoIds.indexOf(id);
         if (i >= 0) state.hiddenVideoIds.splice(i, 1);
-        delete state.hiddenVideoMetadata[id];
+        pendingHiddenMeta.set(id, null);
         // Drop it from the per-channel "Hidden" tally too (hiding and watching
         // are tracked separately, so this never touches the watched database).
         if (WatchedDB) WatchedDB.removeHidden(id);
@@ -4030,6 +4133,7 @@
         mult = Math.min(5, Math.max(1, mult));
         state.settings.volumeBoost = mult;
         settings.volumeBoost = mult;
+        profileVolumeBoost = null;   // a manual change replaces the profile's
         if (mult > 1) ensureBoostGraph();
         applyVolumeBoost();
         // Debounce persistence — wheel scrolling fires many times.
@@ -4211,6 +4315,7 @@
             ? Number(state.settings.volumeBoost || 1) : Number(profileBoost);
         if (!Number.isFinite(boost)) return;
         settings.volumeBoost = Math.min(5, Math.max(1, boost));
+        profileVolumeBoost = profileBoost == null ? null : settings.volumeBoost;
         const video = playerVideo();
         if (video && settings.volumeBoost > 1) {
             video.volume = 1;
@@ -4382,6 +4487,16 @@
         showVolumeOverlay('⏩ ' + rate + '×');
         rememberChannelSpeed(rate);
     }
+
+    // With configurable shortcuts on (the default), the speed hotkeys run in
+    // player-controls.js instead of the legacy handler below; it reports each
+    // change so per-channel memory still records it.
+    function onSpeedAction(event) {
+        if (retired || !event.detail || event.detail.site !== 'youtube') return;
+        const speed = Number(event.detail.speed);
+        if (Number.isFinite(speed) && speed >= 0.1 && speed <= 8) rememberChannelSpeed(speed);
+    }
+    document.addEventListener('ytb-speed-action', onSpeedAction);
 
     document.addEventListener('keydown', (e) => {
         if (retired || sharedInputActionsEnabled || !settings.enabled || !settings.ytSpeedHotkeys) return;
@@ -4743,8 +4858,13 @@
 
     // watched-db.js emits after cross-tab additions/removals and generation
     // resets. Its revision joins the cache key so existing cards reconcile.
+    // A hidden tab catches up once it is shown (see bootObserver) instead of
+    // re-running the full pass for every video watched in another tab.
+    let pendingWhileHidden = false;
     document.addEventListener('ytb-watched-db-change', () => {
-        if (!retired && settings.enabled) runAll();
+        if (retired || !settings.enabled) return;
+        if (document.hidden) pendingWhileHidden = true;
+        else runAll();
     });
 
     /* ==================================================================
@@ -4756,14 +4876,15 @@
         const i = state.hiddenVideoIds.indexOf(id);
         if (i < 0) return false;
         state.hiddenVideoIds.splice(i, 1);
-        delete state.hiddenVideoMetadata[id];
+        pendingHiddenMeta.set(id, null);
         persist();
         return true;
     };
     window.ytsbResetHidden = () => {
         const n = state.hiddenVideoIds.length;
         state.hiddenVideoIds = [];
-        state.hiddenVideoMetadata = {};
+        pendingHiddenMeta = new Map();
+        clearHiddenMeta = true;
         persist();
         return n;
     };
@@ -4812,10 +4933,10 @@
                 if (settings.blockShorts || settings.hideNewsShelves) hideEl(candidate);
                 continue;
             }
-            if (settings.blockShorts && candidate.matches(
+            if (settings.blockShorts && (candidate.matches(
                 'ytd-rich-shelf-renderer[is-shorts], ytd-reel-shelf-renderer, ' +
                 'ytm-reel-shelf-renderer'
-            )) hideEl(candidate);
+            ) || isShortsGridShelf(candidate))) hideEl(candidate);
         }
     }
     function mutationTouchesLegacyContainer(node) {
@@ -4826,8 +4947,19 @@
         return !!(el.querySelector && el.querySelector(LEGACY_MUTATION_CONTAINERS));
     }
 
+    // Captions re-render inside the player several times a second and never
+    // affect filtering, yet each update queued a full pass (measured live
+    // 2026-10: 14 passes in 15 s on a captioned video).
+    const CAPTION_NODES = '.ytp-caption-window-container, .caption-window, ' +
+        '.captions-text, .ytp-caption-segment';
+
+    function isCaptionMutationNode(node) {
+        const el = node && node.nodeType === 1 ? node : node && node.parentElement;
+        return !!(el && el.closest && el.closest(CAPTION_NODES));
+    }
+
     function isLocallyHandledMutationNode(node) {
-        if (isExtensionMutationNode(node)) return true;
+        if (isExtensionMutationNode(node) || isCaptionMutationNode(node)) return true;
         const el = node && node.nodeType === 1 ? node : node && node.parentElement;
         if (el && el.closest &&
             (el.closest(INNER_CONTAINERS) || el.closest(COMMENT_RENDERERS))) return true;
@@ -4878,6 +5010,10 @@
             detailObserver = null;
         }
         detailObserved = new WeakSet();
+        if (rydPressObserver) {
+            rydPressObserver.disconnect();
+            rydPressObserver = null;
+        }
         if (maintenanceTimer) {
             clearTimeout(maintenanceTimer);
             maintenanceTimer = null;
@@ -4893,6 +5029,7 @@
         resetDeArrowWatchPlayerRetry();
         pendingTileEnhancements.clear();
         document.removeEventListener('ytb-apply-playback-profile', onPlaybackProfile);
+        document.removeEventListener('ytb-speed-action', onSpeedAction);
         document.querySelectorAll('.ytb-menu-item').forEach(el => {
             if (el.dataset.ytbInstance === INSTANCE_ID) el.remove();
         });
@@ -4919,7 +5056,6 @@
             return;
         }
 
-        let pendingWhileHidden = false;
         const mustRunHidden = () =>
             settings.enabled &&
             settings.blackoutBlockedChannels &&

@@ -8,7 +8,7 @@
  *     when the "syncBlockLists" setting is on. storage.local stays the
  *     source of truth; sync is a chunked JSON mirror (8KB/item quota).
  * ================================================================== */
-/* global YTB */
+/* global YTB, YTBFeatures */
 (function () {
     'use strict';
 
@@ -78,13 +78,16 @@
         });
     }
 
+    // Built on every background start rather than in onInstalled/onStartup:
+    // neither fires when a disabled add-on is re-enabled, which left the
+    // entries missing until the next browser restart.
+    buildMenus();
+
     api.runtime.onInstalled.addListener((details) => {
-        buildMenus();
         if (details && details.reason === 'install') {
             api.tabs.create({ url: api.runtime.getURL('src/onboarding.html') }).catch(() => {});
         }
     });
-    api.runtime.onStartup.addListener(buildMenus);
 
     /* ---------------- Community data proxies (opt-in features) ----------
      * SponsorBlock / DeArrow / Return YouTube Dislike lookups run here in
@@ -156,8 +159,14 @@
             const map = await r.json();
             const mine = map && map[videoId];
             if (!mine) return commSet(key, {});
-            const t = (mine.titles || []).find(x => !x.original && (x.locked || x.votes >= 0));
-            const th = (mine.thumbnails || []).find(x => !x.original && (x.locked || x.votes >= 0));
+            // Same pick as DeArrow itself: only the top-ranked submission
+            // counts (the API lists locked first, then by votes). When that is
+            // the original, or it was voted down, the original stays.
+            const usable = x => !!x && !x.original && (x.locked || x.votes >= 0);
+            const topTitle = (mine.titles || [])[0];
+            const topThumb = (mine.thumbnails || [])[0];
+            const t = usable(topTitle) ? topTitle : null;
+            const th = usable(topThumb) ? topThumb : null;
             return commSet(key, {
                 // ">" prefixes a word to opt it out of DeArrow's auto-formatting.
                 title: t ? t.title.replace(/(^|\s)>(\S)/g, '$1$2') : null,
@@ -198,12 +207,18 @@
         if (typeof url !== 'string' || !FETCH_ALLOW.some(p => url.startsWith(p))) {
             return { ok: false, error: 'blocked url' };
         }
+        // twitch.js stops waiting after 8 s; abort here too so a provider
+        // that never answers doesn't keep the service worker busy.
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 8000);
         try {
-            const r = await fetch(url);
+            const r = await fetch(url, { signal: ctrl.signal });
             if (!r.ok) return { ok: false, error: 'HTTP ' + r.status };
             return { ok: true, data: await r.json() };
         } catch (e) {
             return { ok: false, error: String(e && e.message || e) };
+        } finally {
+            clearTimeout(timer);
         }
     }
 
@@ -344,7 +359,11 @@
      * ---------------------------------------------------- */
     const META_KEY = 'ytbSyncMeta';
     const CHUNK_PREFIX = 'ytbSyncChunk';
-    const CHUNK_SIZE = 6000;          // chars; well under the 8KB/item quota
+    // Firefox checks each item as key length + the UTF-8 bytes of its JSON
+    // value against an 8192-byte quota, so a chunk is cut by that measure,
+    // not by UTF-16 length: quotes and backslashes are escaped to two bytes,
+    // CJK text takes three, and a surrogate pair is never split.
+    const CHUNK_BYTES = 8000;
     let lastPushedStr = null;         // what we last wrote to sync
     let lastAppliedStr = null;        // what we last applied from sync to local
     let pushTimer = null;
@@ -399,6 +418,19 @@
         return YTB.normalize(r.data);
     }
 
+    // The sync mirror only rewrites the lists. The hidden-video details and
+    // undo history live in their own keys, so drop the empty placeholders
+    // normalize() adds, but keep a copy an older version left inside `data`
+    // for the migration below.
+    function dataOnly(record) {
+        const out = Object.assign({}, record);
+        if (!out.recentActions || !out.recentActions.length) delete out.recentActions;
+        if (!out.hiddenVideoMetadata || !Object.keys(out.hiddenVideoMetadata).length) {
+            delete out.hiddenVideoMetadata;
+        }
+        return out;
+    }
+
     async function setSyncStatus(s) {
         try { await api.storage.local.set({ ytbSyncStatus: s }); } catch (e) { /* ignore */ }
     }
@@ -418,13 +450,32 @@
         }
     }
 
+    function syncChunks(str) {
+        const parts = [];
+        let start = 0;
+        let bytes = 0;
+        for (let i = 0; i < str.length;) {
+            const c = str.codePointAt(i);
+            const size = c === 0x22 || c === 0x5c ? 2 : c < 0x20 ? 6 :
+                c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+            if (bytes + size > CHUNK_BYTES && i > start) {
+                parts.push(str.slice(start, i));
+                start = i;
+                bytes = 0;
+            }
+            bytes += size;
+            i += c > 0xffff ? 2 : 1;
+        }
+        parts.push(str.slice(start));
+        return parts;
+    }
+
     async function pushSync(str) {
         const prev = (await api.storage.sync.get(META_KEY))[META_KEY];
-        const chunks = Math.max(1, Math.ceil(str.length / CHUNK_SIZE));
+        const parts = syncChunks(str);
+        const chunks = parts.length;
         const items = { [META_KEY]: { chunks, updatedAt: Date.now() } };
-        for (let i = 0; i < chunks; i++) {
-            items[CHUNK_PREFIX + i] = str.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-        }
+        parts.forEach((part, i) => { items[CHUNK_PREFIX + i] = part; });
         lastPushedStr = str;
         await api.storage.sync.set(items);
         if (prev && prev.chunks > chunks) {
@@ -478,7 +529,7 @@
         const str = listsOf(merged);
         if (str !== listsOf(local)) {
             lastAppliedStr = str;
-            await api.storage.local.set({ data: merged });
+            await api.storage.local.set({ data: dataOnly(merged) });
         }
         await pushSync(str);
     }
@@ -499,7 +550,7 @@
         next.twitchSidebar = inc.twitchSidebar;
         for (const f of SIMPLE_LIST_FIELDS) next[f] = inc[f];
         lastAppliedStr = listsOf(next);
-        await api.storage.local.set({ data: next });
+        await api.storage.local.set({ data: dataOnly(next) });
         await setSyncStatus({ ok: true, at: Date.now() });
     }
 
@@ -524,8 +575,36 @@
         }
     });
 
-    // On browser startup, reconcile with whatever sync has.
+    /* ---------------- Storage layout ----------------
+     * 4.8.7 moved the hidden-video details and the undo history out of
+     * `data` into their own keys (see feature-core.js). Readers join both
+     * places and every writer of those keys folds the old copy in, but the
+     * copy left inside `data` would still be resent to every tab on each
+     * `data` write until something touched it, so move it once here.
+     * ------------------------------------------------ */
+    async function migrateSplitRecords() {
+        const metaKey = YTBFeatures.HIDDEN_VIDEO_META_KEY;
+        const historyKey = YTBFeatures.RECENT_ACTIONS_KEY;
+        // Read the large keys only when there is something to move: on
+        // Chromium this runs each time the service worker starts.
+        const { data } = await api.storage.local.get('data');
+        if (!data || typeof data !== 'object' ||
+            !('hiddenVideoMetadata' in data || 'recentActions' in data)) return;
+        const r = await api.storage.local.get([metaKey, historyKey]);
+        const next = Object.assign({}, data);
+        delete next.hiddenVideoMetadata;
+        delete next.recentActions;
+        await api.storage.local.set({
+            data: next,
+            [metaKey]: YTBFeatures.mergeHiddenVideoMetadata(data.hiddenVideoMetadata, r[metaKey]),
+            [historyKey]: YTBFeatures.mergeRecentActions(data.recentActions, r[historyKey])
+        });
+    }
+
+    // On browser startup: migrate first (both rewrite `data`), then reconcile
+    // with whatever sync has.
     (async () => {
+        try { await migrateSplitRecords(); } catch (e) { /* retried on the next start */ }
         try {
             const local = await getLocal();
             if (local.settings.syncBlockLists) await initialMerge();

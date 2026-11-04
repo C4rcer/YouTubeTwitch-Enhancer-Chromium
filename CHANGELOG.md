@@ -6,7 +6,9 @@ shipped from this repo as "4.8.0" and "4.8.1"; they correspond to
 Firefox 4.7.1 and 4.7.2 and have been renumbered to match (nothing was
 ever published to the Chrome Web Store under the old numbers).
 
-## Unreleased
+## 4.8.11 — 2026-11-04
+
+Brings this repo to the Firefox 4.8.11 feature set; the Firefox CHANGELOG has the full story behind each fix.
 
 ### Fixed
 
@@ -14,6 +16,24 @@ ever published to the Chrome Web Store under the old numbers).
 - "Block this Twitch category" now resolves the card you right-clicked, wherever on it you clicked (Browse card tag pills such as "IRL", box art, padding, the home page's featured stream, sidebar cards by name), instead of answering "Couldn't work out which category that is". A right-click on a sidebar card no longer falls through to the watched stream's category, collection shelf headings such as "Just Chatting & IRL" get a message explaining they are not categories, and shelf category cards save a clean name. Same change as the Firefox "Unreleased" fix of 2026-11-01; its regression tests live in the Firefox repo's `tests/twitch.test.js`, which this repo does not have yet.
 - The previous video's title could stay under the player beside the current one after the add-on wrote the heading (a DeArrow title, the title repair, or the original put back when DeArrow titles is switched off). The clean-up for the add-on's own stale title text now runs on every pass and as soon as YouTube inserts the new title, whatever the DeArrow setting, instead of only while DeArrow titles is on. Firefox 4.8.9 also removes any title text YouTube's ShadyDOM does not own, which catches text whose markers were cleared; Chromium content scripts cannot see the page-world data that proof needs, so here it stays inert and only the marker-based clean-up applies. Its regression tests live in the Firefox repo's `tests/content-filter.test.js`.
 - Auto max quality could leave a video at YouTube's automatic quality, which follows the player's size, for the whole video. It set the quality once and stopped: content.js asked `page-quality.js` until it answered "done", and it answered after its first attempt. After an in-page navigation the player reports the new video with its streams, then about 100 ms later resets its preference to "auto" while it loads that video's formats, which undid that attempt. content.js now asks on every pass, and `page-quality.js` re-applies the highest level until the video plays at it (or five seconds have passed), skips an ad's streams and a player still on the previous video, and afterwards corrects only a fall back to "auto", so a quality you pick by hand is kept. Same fix as Firefox 4.8.10, where the reset was reproduced live; new regressions in `tests/page-quality.test.js` and `tests/content-filter.test.js` replay it and fail against the previous code.
+- YouTube search left an empty "Shorts" heading and "Show more" button where each Shorts shelf had been; a `grid-shelf-view-model` holding Shorts is now hidden whole. (Firefox 4.8.6)
+- Blocked keywords matched the channel name, view count and age of watch-page sidebar videos, because the title lookup read the whole metadata block; titles are now looked up in priority tiers, and DeArrow writes to the title link. (Firefox 4.8.6)
+- One emote provider that never answered held back all third-party emotes. Each lookup now gives up after 8 seconds (the service worker aborts its fetch too), all six run at once, and each provider's emotes appear as soon as it answers. (Firefox 4.8.6)
+- The drops auto-claim tab could close before the inventory rendered, and claiming only worked with Twitch in English. The tab now closes 6 seconds after its last claim or after 30 seconds with nothing to claim, never while you're on it, and "Claim Now" is recognised in every Twitch UI language. (Firefox 4.8.6)
+- Playback profiles re-applied on every save, undoing manual speed, caption and compressor changes; they now re-apply only when a profile changes, and a profile's volume boost lasts the session on its own. "Remember speed per channel" records the shared speed hotkeys again. (Firefox 4.8.6)
+- DeArrow showed a lower-ranked replacement title when the community had voted for the original; only the top-ranked submission counts now. (Firefox 4.8.6)
+- Context menu entries could be missing until the next browser restart; they are now built every time the service worker starts. (Firefox 4.8.6)
+- Browser sync could fail for block lists with non-Latin names; chunks are now cut by UTF-8 bytes and never inside a character. (Firefox 4.8.6)
+- Disliking a video didn't change the Return YouTube Dislike count. The extension never sends votes, so RYD's count can't include yours; the shown count now adds one while your dislike is pressed. (Firefox 4.8.11)
+
+### Performance
+
+- Hidden-video details and undo history moved out of the shared `data` record into their own keys (`ytbHiddenVideoMeta`, `ytbRecentActions`), so frequent saves no longer copy them to every tab. Existing copies move once; the service worker reads the large keys only when there is something to move. (Firefox 4.8.7)
+- No wheel listener is attached unless a wheel shortcut is configured, and then only on the player. Caption updates no longer trigger full filtering passes, and a background YouTube tab catches up on watched-history changes once when shown. The uptime chip's dead LD+JSON lookup is gone. (Firefox 4.8.7)
+
+### Validation
+
+- The Firefox regression tests for these changes are ported: `tests/mini-dom.js`, `tests/twitch.test.js` and `tests/background.test.js`, plus new cases in the content-filter, player-controls and common-features tests. They are adapted to Chromium's page-world bridges, the service-worker relay for emote requests, `sendResponse` messaging and emotes being off by default. 30 of them fail against the previous Chromium code, and the full suite passes 130/130. Not yet run in a Chromium browser.
 
 ## 4.8.4 — 2026-07-18
 

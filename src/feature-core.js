@@ -20,6 +20,14 @@
     const MAX_SIDEBAR_GROUPS = 30;
     const MAX_SIDEBAR_CHANNELS = 250;
     const MAX_RECENT_ACTIONS = 50;
+    const MAX_HIDDEN_VIDEO_METADATA = 2000;
+
+    // The two bulky, rarely read records live outside the shared `data` key,
+    // so the frequent `data` writes, and the copy of the record every open
+    // tab receives on each one, stay small. Each key holds exactly what the
+    // `data` field of the same name held before 4.8.7.
+    const HIDDEN_VIDEO_META_KEY = 'ytbHiddenVideoMeta';
+    const RECENT_ACTIONS_KEY = 'ytbRecentActions';
 
     const ACTION_CATALOGUE = Object.freeze([
         { id: 'playPause', label: 'Play / pause', sites: SITES },
@@ -537,9 +545,28 @@
                 thumbnail: /^https:\/\//.test(raw.thumbnail || '') ? cleanText(raw.thumbnail, 500) : '',
                 addedAt: Number.isFinite(Number(raw.addedAt)) ? Number(raw.addedAt) : Date.now()
             };
-            if (Object.keys(output).length >= 2000) break;
+            if (Object.keys(output).length >= MAX_HIDDEN_VIDEO_METADATA) break;
         }
         return output;
+    }
+
+    // Union of several copies (the legacy `data` field and the separate key).
+    // Later sources win per video, and the newest entries are kept.
+    function mergeHiddenVideoMetadata(...sources) {
+        const merged = {};
+        for (const source of sources) Object.assign(merged, normalizeHiddenVideoMetadata(source));
+        return Object.fromEntries(Object.entries(merged)
+            .sort((a, b) => b[1].addedAt - a[1].addedAt)
+            .slice(0, MAX_HIDDEN_VIDEO_METADATA));
+    }
+
+    // Same for undo history; later sources win per action id.
+    function mergeRecentActions(...sources) {
+        const byId = new Map();
+        for (const source of sources) {
+            for (const action of normalizeRecentActions(source)) byId.set(action.id, action);
+        }
+        return normalizeRecentActions([...byId.values()]);
     }
 
     function normalizeFeatureData(value) {
@@ -633,6 +660,8 @@
         ACTION_CATALOGUE,
         DEFAULT_INPUT_BINDINGS,
         DEFAULT_PLAYBACK_PROFILE,
+        HIDDEN_VIDEO_META_KEY,
+        RECENT_ACTIONS_KEY,
         defaultInputBindings,
         defaultProfile,
         normalizeKeyChord,
@@ -651,6 +680,8 @@
         normalizeSettingsPresets,
         normalizeRecentActions,
         normalizeHiddenVideoMetadata,
+        mergeRecentActions,
+        mergeHiddenVideoMetadata,
         normalizeFeatureData,
         selectPlaybackProfile,
         addRecentAction,

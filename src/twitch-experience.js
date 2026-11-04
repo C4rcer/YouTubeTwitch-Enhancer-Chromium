@@ -516,13 +516,26 @@
         let pendingQualityRequest = '';
         const recovery = { attempt: 0, timer: null, kind: '', signature: '' };
 
-        async function mergeStorage(mutator) {
+        // Undo entries go to the history's own key (see feature-core.js),
+        // which is only read when the save may add one.
+        async function mergeStorage(mutator, mayRecord) {
             try {
-                const stored = await api.storage.local.get(STORAGE_KEY);
+                const historyKey = mayRecord && featureCore && featureCore.mergeRecentActions
+                    ? featureCore.RECENT_ACTIONS_KEY : '';
+                const stored = await api.storage.local.get(historyKey ? [STORAGE_KEY, historyKey] : STORAGE_KEY);
                 const full = stored && stored[STORAGE_KEY] && typeof stored[STORAGE_KEY] === 'object'
                     ? stored[STORAGE_KEY] : {};
-                const next = mutator(Object.assign({}, full)) || full;
-                await api.storage.local.set({ [STORAGE_KEY]: next });
+                const recorded = [];
+                const next = mutator(Object.assign({}, full), recorded) || full;
+                const items = { [STORAGE_KEY]: next };
+                if (historyKey && recorded.length) {
+                    // Fold in any copy an older version left inside `data`.
+                    let history = featureCore.mergeRecentActions(next.recentActions, stored[historyKey]);
+                    delete next.recentActions;
+                    for (const action of recorded) history = featureCore.addRecentAction(history, action);
+                    items[historyKey] = history;
+                }
+                await api.storage.local.set(items);
             } catch (e) {
                 if (env.console && env.console.warn) env.console.warn('[YT/Twitch Enhancer] Local Twitch save failed', e);
             }
@@ -530,12 +543,11 @@
 
         function savePart(key, value, recentLabel) {
             rawData[key] = value;
-            return mergeStorage(full => {
+            return mergeStorage((full, recorded) => {
                 const before = full[key];
                 full[key] = value;
-                if (recentLabel && featureCore && featureCore.addRecentAction &&
-                        (!full.settings || full.settings.recentActionsEnabled !== false)) {
-                    full.recentActions = featureCore.addRecentAction(full.recentActions, {
+                if (recentLabel && (!full.settings || full.settings.recentActionsEnabled !== false)) {
+                    recorded.push({
                         id: 'action-' + now().toString(36) + '-' + Math.random().toString(36).slice(2, 7),
                         type: 'sidebar-change', label: recentLabel,
                         before: { [key]: before }, after: { [key]: value },
@@ -543,7 +555,7 @@
                     });
                 }
                 return full;
-            });
+            }, !!recentLabel);
         }
 
         function savePlayerOptions(syncSeekSetting) {

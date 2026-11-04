@@ -24,6 +24,7 @@
     let osdTimer = null;
     let lastUrl = location.href;
     let profileApplying = false;
+    let profileFieldsSignature = null;
 
     document.dispatchEvent(new CustomEvent(TAKEOVER_EVENT, { detail: INSTANCE_ID }));
 
@@ -153,6 +154,10 @@
         const speed = Math.min(8, Math.max(0.1, Math.round(value * 100) / 100));
         video.playbackRate = speed;
         showOsd('Speed ' + speed + '×');
+        // The YouTube content script owns the per-channel speed memory.
+        document.dispatchEvent(new CustomEvent('ytb-speed-action', {
+            detail: { site: SITE, speed }
+        }));
         return true;
     }
 
@@ -287,12 +292,36 @@
 
     function onWheel(event) {
         if (retired || !event.deltaY) return;
-        const root = playerRoot(playerVideo());
-        if (!root || !root.contains(event.target)) return;
+        // Resolve the shortcut first: finding the player measures layout.
         const action = actionFor('wheel', event.deltaY < 0 ? 'WheelUp' : 'WheelDown');
-        if (!action || !runAction(action)) return;
+        if (!action) return;
+        const root = playerRoot(playerVideo());
+        if (!root || !root.contains(event.target) || !runAction(action)) return;
         event.preventDefault();
         event.stopImmediatePropagation();
+    }
+
+    // A non-passive wheel listener makes the browser wait for this script
+    // before every scroll it covers, so one exists only while a wheel shortcut
+    // is configured, and only on the player's parent. Capturing there still
+    // runs before content.js's own listener on #movie_player, so a configured
+    // shortcut keeps priority over scroll-for-volume.
+    let wheelTarget = null;
+
+    function wheelShortcutsConfigured() {
+        const siteBindings = featureData.inputBindings[SITE];
+        return !!(siteBindings && siteBindings.enabled &&
+            Object.values(siteBindings.wheel || {}).some(Boolean));
+    }
+
+    function ensureWheelListener() {
+        if (retired) return;
+        const root = wheelShortcutsConfigured() ? playerRoot(playerVideo()) : null;
+        const target = root ? root.parentElement || root : null;
+        if (target === wheelTarget) return;
+        if (wheelTarget) wheelTarget.removeEventListener('wheel', onWheel, true);
+        wheelTarget = target;
+        if (target) target.addEventListener('wheel', onWheel, { capture: true, passive: false });
     }
 
     function chooseYouTubeQuality(profile) {
@@ -351,6 +380,9 @@
 
     function applyProfile(force) {
         if (retired) return;
+        // Runs on new media, navigation and binding edits: when the player
+        // or its shortcuts can have changed.
+        ensureWheelListener();
         const video = playerVideo();
         if (!video || video.readyState < 1) return;
         const signature = mediaSignature(video);
@@ -426,11 +458,26 @@
         }
     }
 
+    // Only the playback-profile fields re-run the profile. Every other write to
+    // the shared record (a volume-wheel save, a hide in another tab, Twitch
+    // diagnostics) must leave a manual speed, caption or compressor change alone.
+    function profileFields(data) {
+        return JSON.stringify([
+            data.playbackProfiles,
+            data.activePlaybackProfiles,
+            data.channelPlaybackProfiles
+        ]);
+    }
+
     function loadData(value) {
         rawData = value && typeof value === 'object' ? value : {};
         settings = rawData.settings && typeof rawData.settings === 'object'
             ? rawData.settings : {};
         featureData = YTBFeatures.normalizeFeatureData(rawData);
+        ensureWheelListener();
+        const fields = profileFields(featureData);
+        if (fields === profileFieldsSignature) return;
+        profileFieldsSignature = fields;
         currentMediaSignature = '';
         scheduleProfile(true);
     }
@@ -454,7 +501,8 @@
         document.removeEventListener(TAKEOVER_EVENT, onTakeover);
         document.removeEventListener('keydown', onKeyDown, true);
         document.removeEventListener('pointerup', onPointerUp, true);
-        document.removeEventListener('wheel', onWheel, true);
+        if (wheelTarget) wheelTarget.removeEventListener('wheel', onWheel, true);
+        wheelTarget = null;
         document.removeEventListener('loadedmetadata', onMediaEvent, true);
         document.removeEventListener('emptied', onMediaEvent, true);
         document.removeEventListener('yt-navigate-finish', onNavigation);
@@ -466,7 +514,6 @@
 
     document.addEventListener('keydown', onKeyDown, true);
     document.addEventListener('pointerup', onPointerUp, true);
-    document.addEventListener('wheel', onWheel, { capture: true, passive: false });
     document.addEventListener('loadedmetadata', onMediaEvent, true);
     document.addEventListener('emptied', onMediaEvent, true);
     document.addEventListener('yt-navigate-finish', onNavigation);
