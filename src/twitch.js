@@ -607,10 +607,23 @@
      * The claim button appears inside the community-points summary in the
      * chat input area (also matched globally by aria-label as a fallback).
      * Chat hidden via our CSS keeps this in the DOM, so claiming still works.
+     *
+     * Twitch's claim flow (its component source, verified live 2026-11-07):
+     * a click disables the button until the request settles; success removes
+     * the bonus; an error turns the button red (its icon loses the
+     * claimable-bonus__icon class) and removes the bonus 2 s later. So the
+     * toast waits for the outcome, and a disabled button is never clicked.
+     * A claim can also never settle: with k.twitchcdn.net blocked (a DNS
+     * filter), Twitch's anti-bot script never loads, every claim answers
+     * "failed integrity check", and the page waits for a challenge it cannot
+     * solve, leaving the button disabled until the tab is reloaded.
      * ================================================================== */
-    function autoClaim() {
-        if (!settings.twEnabled || !settings.twAutoClaim) return;
-        if (Date.now() - lastClaimAt < 5000) return;   // debounce double-fires
+    const CLAIM_POLL_MS = 250;
+    const CLAIM_RETRY_MS = 5000;
+    const CLAIM_STUCK_MS = 30000;
+    let claimWatchTimer = null;
+
+    function claimBonusButton() {
         const hit = document.querySelector(
             '[data-test-selector="community-points-summary"] .claimable-bonus__icon, ' +
             '[data-test-selector="community-points-summary"] [data-test-selector*="claim" i], ' +
@@ -618,13 +631,44 @@
             '[data-test-selector="community-points-summary"] button[aria-label*="Claim"], ' +
             'button[aria-label*="Claim Bonus"], .claimable-bonus__icon'
         );
-        if (!hit) return;
-        const btn = hit.closest('button') || hit;
-        try {
-            btn.click();
-            lastClaimAt = Date.now();
-            toast('Claimed channel points', '+bonus');
-        } catch (e) { /* ignore */ }
+        return hit && (hit.closest('button') || hit);
+    }
+
+    function autoClaim() {
+        if (!settings.twEnabled || !settings.twAutoClaim || claimWatchTimer) return;
+        if (Date.now() - lastClaimAt < CLAIM_RETRY_MS) return;   // debounce double-fires
+        const btn = claimBonusButton();
+        if (!btn || btn.disabled) return;
+        try { btn.click(); } catch (e) { return; }
+        lastClaimAt = Date.now();
+        watchClaim(location.pathname, lastClaimAt, false);
+    }
+
+    // Follows one click to its outcome. Success is the bonus going away
+    // without Twitch's error state having shown.
+    function watchClaim(path, sentAt, failed) {
+        claimWatchTimer = setTimeout(() => {
+            claimWatchTimer = null;
+            if (retired || location.pathname !== path) return;
+            const btn = claimBonusButton();
+            const waited = Date.now() - sentAt;
+            if (!btn) {
+                if (failed) toast('Twitch couldn’t claim the channel points bonus', '');
+                else toast('Claimed channel points', '+bonus');
+                return;
+            }
+            if (btn.disabled) {
+                if (waited >= CLAIM_STUCK_MS) {
+                    toast('Twitch hasn’t confirmed the channel points claim', '');
+                    return;
+                }
+            } else if (!btn.querySelector('.claimable-bonus__icon')) {
+                failed = true;
+            } else if (!failed && waited >= CLAIM_RETRY_MS) {
+                return;   // the click never took; the next pass tries again
+            }
+            watchClaim(path, sentAt, failed);
+        }, CLAIM_POLL_MS);
     }
 
     /* ---- drops & moments --------------------------------------------
@@ -2429,6 +2473,8 @@
         hidePreview();
         closeEmotePanel();
         clearTimeout(toastTimer);
+        clearTimeout(claimWatchTimer);
+        claimWatchTimer = null;
         try {
             if (api.storage.onChanged && typeof api.storage.onChanged.removeListener === 'function') {
                 api.storage.onChanged.removeListener(onStorageChanged);

@@ -6,6 +6,22 @@ shipped from this repo as "4.8.0" and "4.8.1"; they correspond to
 Firefox 4.7.1 and 4.7.2 and have been renumbered to match (nothing was
 ever published to the Chrome Web Store under the old numbers).
 
+## Unreleased
+
+### Added
+
+- A "Rate it on the Chrome Web Store" link beside the existing Ko-fi link in the popup, both settings pages and the welcome page. It opens the extension's store page in a new tab, and nothing is sent unless you click it. Same as the Firefox 4.8.12 rating link, which points at addons.mozilla.org.
+
+### Fixed
+
+- Channel points auto-claim no longer clicks Twitch's disabled "Claim Bonus" button (the grey chest) or announces "Claimed channel points" every 5 seconds while nothing is being claimed. Each click is followed to its outcome: "Claimed channel points" once Twitch removes the bonus, "Twitch couldn't claim the channel points bonus" after its error state, and one "Twitch hasn't confirmed the channel points claim" if the button stays disabled for 30 seconds (as happens when `k.twitchcdn.net`, Twitch's anti-bot script host, is blocked). Matches Firefox 4.8.12; the four regressions in `tests/twitch.test.js` came across unchanged.
+- Live streams were sped up by the default playback speed, a remembered per-channel speed and playback profiles, and with "Hide already-watched videos" on they were recorded as watched as soon as they played. YouTube no longer sets the `ytp-live` class on `#movie_player` that the live check relied on, and profiles had never checked for YouTube live streams. Same fix as Firefox 4.8.13: the player API's `isLive`, trusted only once the player is on the video in the address bar, with the time display's `ytp-live` switch as the fallback. This build's isolated content scripts can't call the player API, so `page-quality.js` (MAIN world) answers a `ytb-live-query` DOM event with a `ytb-live-data` event carrying `getVideoData()`'s video ID and live flag as a JSON string. It replies inside the query's `dispatchEvent()` call, so the check stays synchronous and needs no message round trip or DOM attribute.
+
+### Validation
+
+- Live-stream fix, checked end to end on 2026-11-09 in a throwaway headless Chrome 153 profile with the unpacked extension, on Lofi Girl's live stream and normal videos reached from its sidebar by in-page navigation. Before the fix, a 1.75x playback profile played the live stream at 1.75x, and a 1.5x default speed played it at 1.5x after going back to it from a normal video. With the fix the live stream stayed at 1x in all four cases (opened directly or by going back, default speed or profile), while the normal videos still got 1.5x and 1.75x. From the content script's isolated world, `#movie_player` exposed no `getVideoData`, and the `ytb-live-query` exchange returned the live stream's ID with `isLive: true` as a string (and `isLive: false` for the normal video).
+- The Firefox 4.8.13 regressions came across through `patch` (the content-filter harness takes a `player` option here), plus three Chromium ones: the MAIN-world helper's answer in `tests/page-quality.test.js`, and the isolated-world path in the content-filter and player-controls tests, each against the real or a stand-in `page-quality.js`. All ten fail against the previous Chromium code; the full suite passes 144/144.
+
 ## 4.8.11 — 2026-11-04
 
 Brings this repo to the Firefox 4.8.11 feature set; the Firefox CHANGELOG has the full story behind each fix.

@@ -25,6 +25,10 @@
     let lastUrl = location.href;
     let profileApplying = false;
     let profileFieldsSignature = null;
+    // Profile passes put off while the player is still on the previous video:
+    // 25 passes 120 ms apart (3 s) cover the ~150 ms YouTube takes with room to spare.
+    const LIVE_WAIT_LIMIT = 25;
+    let liveWaits = 0;
 
     document.dispatchEvent(new CustomEvent(TAKEOVER_EVENT, { detail: INSTANCE_ID }));
 
@@ -114,6 +118,62 @@
             !/^\/videos\/\d+/.test(location.pathname) &&
             location.hostname !== 'clips.twitch.tv' &&
             !/\/clip\//.test(location.pathname);
+    }
+
+    // YouTube's player: true or false, or null while it is still on the
+    // previous video. Same rules as livePlayerState() in content.js: the
+    // player API's video data, and only when it describes the video in the
+    // URL; the time display's "ytp-live" switch when there is no API.
+    function youTubeLiveState() {
+        const player = document.getElementById('movie_player');
+        if (!player) return false;
+        const data = youTubePlayerLiveData(player);
+        if (data) {
+            const vid = location.pathname === '/watch'
+                ? new URLSearchParams(location.search).get('v') : '';
+            if (vid && data.videoId && data.videoId !== vid) return null;
+            return data.isLive;
+        }
+        if (player.classList && player.classList.contains('ad-showing')) return null;
+        return !!(player.querySelector && player.querySelector('.ytp-time-display.ytp-live'));
+    }
+
+    function youTubePlayerLiveData(player) {
+        try {
+            const pageApi = player.wrappedJSObject || player;
+            if (typeof pageApi.getVideoData !== 'function') return pageYouTubeLiveData();
+            const data = pageApi.getVideoData();
+            if (data && typeof data.isLive === 'boolean') {
+                return { videoId: String(data.video_id || ''), isLive: data.isLive };
+            }
+        } catch (error) { /* use the DOM signal */ }
+        return null;
+    }
+
+    // Chromium's isolated world cannot reach the page player API:
+    // page-quality.js answers a ytb-live-query DOM event with a ytb-live-data
+    // event (a JSON string) before dispatchEvent() returns.
+    function pageYouTubeLiveData() {
+        let reply = '';
+        const onReply = event => { if (typeof event.detail === 'string') reply = event.detail; };
+        document.addEventListener('ytb-live-data', onReply);
+        try {
+            document.dispatchEvent(new CustomEvent('ytb-live-query'));
+        } catch (error) { /* no answer: use the DOM signal */ }
+        document.removeEventListener('ytb-live-data', onReply);
+        try {
+            const data = reply ? JSON.parse(reply) : null;
+            if (data && typeof data.isLive === 'boolean') {
+                return { videoId: String(data.videoId || ''), isLive: data.isLive };
+            }
+        } catch (error) { /* malformed: use the DOM signal */ }
+        return null;
+    }
+
+    // Speeding up a live stream races to the live edge and stalls, so
+    // profiles leave live speed alone on both sites.
+    function liveStreamState() {
+        return SITE === 'twitch' ? isLiveTwitch() : youTubeLiveState();
     }
 
     function clickFirst(selectors) {
@@ -389,10 +449,20 @@
         if (!force && signature && signature === currentMediaSignature) return;
         const selection = YTBFeatures.selectPlaybackProfile(rawData, SITE, channelKey());
         if (!selection || !selection.profile) return;
+        const live = liveStreamState();
+        if (live === null && liveWaits < LIVE_WAIT_LIMIT) {
+            // The player is still on the previous video: try again shortly.
+            liveWaits++;
+            scheduleProfile(force);
+            return;
+        }
+        liveWaits = 0;
         currentMediaSignature = signature;
         profileApplying = true;
         const profile = selection.profile;
-        if (profile.speed !== null && !(SITE === 'twitch' && isLiveTwitch())) {
+        // Still unknown after the wait: leave the speed alone rather than
+        // risk speeding up a live stream.
+        if (profile.speed !== null && live === false) {
             video.playbackRate = profile.speed;
         }
         if (SITE === 'youtube') chooseYouTubeQuality(profile);

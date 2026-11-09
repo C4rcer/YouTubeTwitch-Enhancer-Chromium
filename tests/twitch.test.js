@@ -81,6 +81,7 @@ function loadTwitch(options = {}) {
         isDropClaimLabel,
         claimInventoryHere,
         autoClaimDrops,
+        autoClaim,
         maybeFetchEmotes,
         categoryFromTarget,
         configure(input) { settings = Object.assign({}, DEFAULT_SETTINGS, input); },
@@ -185,6 +186,82 @@ test('an auto-claim tab with nothing to claim gives up, unless the user is on it
     watched.armInventoryClose();
     watched.advance(31000); watched.autoClaimDrops();
     assert.deepEqual(watched.sent, [], 'a tab the user switched to stays open');
+});
+
+// The channel-points bonus as the live summary renders it (2026-11-07).
+function pointsSummary() {
+    const icon = h('div', { class: 'claimable-bonus__icon' });
+    const button = h('button', { 'aria-label': 'Claim Bonus' }, icon);
+    const summary = h('div', { 'data-test-selector': 'community-points-summary' }, button);
+    return { summary, button, icon };
+}
+
+function loadChannel(summary) {
+    const tw = loadTwitch({ body: [summary], pathname: '/opie420247', hidden: false });
+    tw.configure({});
+    tw.toastText = () => {
+        const el = tw.document.getElementById('ytbtw-toast');
+        return el ? el.textContent : '';
+    };
+    return tw;
+}
+
+test('channel points: a disabled claim button is never clicked or reported', () => {
+    // The grey chest found live: Twitch's earlier claim never settled.
+    const { summary, button } = pointsSummary();
+    button.disabled = true;
+    const tw = loadChannel(summary);
+    for (let t = 0; t < 60000; t += 2500) { tw.autoClaim(); tw.advance(2500); }
+    assert.equal(button.clicks, 0);
+    assert.equal(tw.toastText(), '');
+});
+
+test('channel points: "Claimed" waits for Twitch to remove the bonus', () => {
+    const { summary, button } = pointsSummary();
+    const tw = loadChannel(summary);
+    tw.autoClaim();
+    assert.equal(button.clicks, 1);
+    assert.equal(tw.toastText(), '', 'nothing is claimed yet when the click goes out');
+
+    button.disabled = true;   // Twitch's request is in flight
+    tw.advance(250);
+    assert.equal(tw.toastText(), '');
+    button.disabled = false;  // settled; the bonus slides out
+    tw.advance(250);
+    assert.equal(tw.toastText(), '');
+    button.remove();
+    tw.advance(250);
+    assert.equal(tw.toastText(), 'Claimed channel points +bonus');
+});
+
+test('channel points: a claim Twitch rejects is not reported as claimed', () => {
+    const { summary, button, icon } = pointsSummary();
+    const tw = loadChannel(summary);
+    tw.autoClaim();
+    button.disabled = true;
+    tw.advance(250);
+    button.disabled = false;  // red error state: the icon loses its class
+    icon.classList.remove('claimable-bonus__icon');
+    tw.advance(250);
+    tw.autoClaim();
+    assert.equal(button.clicks, 1, 'the error state is not clicked again');
+    tw.advance(2000);
+    button.remove();          // Twitch drops the bonus 2 s after an error
+    tw.advance(250);
+    assert.equal(tw.toastText(), 'Twitch couldn’t claim the channel points bonus');
+});
+
+test('channel points: a claim that never settles is reported once, not retried', () => {
+    const { summary, button } = pointsSummary();
+    const tw = loadChannel(summary);
+    tw.autoClaim();
+    button.disabled = true;   // "failed integrity check" and no way to answer it
+    for (let t = 0; t < 30000; t += 2500) { tw.advance(2500); tw.autoClaim(); }
+    assert.equal(tw.toastText(), 'Twitch hasn’t confirmed the channel points claim');
+    tw.document.getElementById('ytbtw-toast').textContent = '';
+    for (let t = 0; t < 60000; t += 2500) { tw.advance(2500); tw.autoClaim(); }
+    assert.equal(button.clicks, 1);
+    assert.equal(tw.toastText(), '', 'the stuck notice is shown once');
 });
 
 // Markup shapes below mirror the live pages (2026-11-01).

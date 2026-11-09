@@ -95,6 +95,13 @@ test('new settings and option helper text is never below twelve pixels', () => {
     assert.doesNotMatch(read('src/options.html'), /font-size:\s*(?:10|11)px/);
     assert.doesNotMatch(read('src/twitch-options.html'), /font-size:\s*(?:10|11)px/);
 });
+test('every Ko-fi link has a Chrome Web Store rating link beside it, both opening safely', () => {
+    for (const file of ['src/popup.html', 'src/options.html', 'src/twitch-options.html', 'src/onboarding.html']) {
+        const html = read(file);
+        assert.match(html, /class="support-links">\s*<a class="rate" href="https:\/\/chromewebstore\.google\.com\/detail\/youtubetwitch-enhancer\/iiacpabbnbggfpmpkbbaiffeegejphff" target="_blank" rel="noopener">/, file);
+        assert.match(html, /<a class="kofi" href="https:\/\/ko-fi\.com\/carcer7378" target="_blank" rel="noopener">/, file);
+    }
+});
 test('legacy speed listeners defer to enabled configurable bindings', () => {
     assert.match(read('src/content.js'), /sharedInputActionsEnabled[\s\S]+ytSpeedHotkeys/);
     assert.match(read('src/twitch.js'), /sharedInputActionsEnabled[\s\S]+twSpeedHotkeys/);

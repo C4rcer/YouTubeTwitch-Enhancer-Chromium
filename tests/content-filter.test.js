@@ -172,6 +172,10 @@ function loadContentHarness(watched, options = {}) {
             getVideoData() { return playerData; }
         });
     }
+    if (options.player) elements.set('movie_player', options.player);
+    // Page-world listeners a test attaches (attachPageWorld): they receive the
+    // events content.js dispatches on document, as the shared DOM delivers them.
+    const pageListeners = {};
     const watchFlexy = flexyData ? {
         getAttribute(name) { return name === 'video-id' ? flexyData.videoId : null; }
     } : null;
@@ -187,7 +191,13 @@ function loadContentHarness(watched, options = {}) {
         hidden: false,
         body: new FakeRoot([]),
         addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
-        dispatchEvent() { return true; },
+        removeEventListener(type, fn) {
+            listeners[type] = (listeners[type] || []).filter(item => item !== fn);
+        },
+        dispatchEvent(event) {
+            (pageListeners[event.type] || []).forEach(fn => fn(event));
+            return true;
+        },
         querySelector(selector) {
             if (watchTitle && selector.includes('ytd-watch-metadata h1')) return watchTitle;
             if (watchFlexy && selector === 'ytd-watch-flexy[video-id]') return watchFlexy;
@@ -329,6 +339,8 @@ function loadContentHarness(watched, options = {}) {
         parseVideoCountText,
         setCurrentChannel(info) { curChannelInfo = info; },
         applyMaxQuality,
+        applyDefaultSpeed,
+        ensureWatchedHook,
         setPlaybackRate,
         preventIdlePause,
         setPath(path) {
@@ -384,8 +396,33 @@ function loadContentHarness(watched, options = {}) {
         },
         emitWindowMessage(data) {
             (windowListeners.message || []).forEach(fn => fn({ source: context.window, data }));
-        }
+        },
+        addPageListener(type, fn) { (pageListeners[type] ||= []).push(fn); }
     });
+}
+
+// Runs the real MAIN-world helper beside content.js: pagePlayer is the page
+// world's view of #movie_player (with its API), the harness player is the
+// isolated world's view (without it). Events cross both ways through document.
+function attachPageWorld(api, pagePlayer) {
+    const context = {
+        console,
+        Date,
+        JSON,
+        location: { origin: 'https://www.youtube.com' },
+        CustomEvent: class CustomEvent {
+            constructor(type, init) { this.type = type; this.detail = init && init.detail; }
+        },
+        document: {
+            getElementById: id => (id === 'movie_player' ? pagePlayer : null),
+            addEventListener: (type, fn) => api.addPageListener(type, fn),
+            dispatchEvent(event) { api.fire(event.type, event.detail); return true; }
+        },
+        addEventListener() {}
+    };
+    context.window = context;
+    vm.createContext(context);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'src', 'page-quality.js'), 'utf8'), context);
 }
 
 function childListRecord(root) {
@@ -1631,4 +1668,133 @@ test('a count written before a reload still follows your vote', () => {
     button.setAttribute('aria-pressed', 'false');
     api.mutate(button, 'aria-pressed');
     assert.equal(button.querySelector('.ytb-ryd-count').textContent, '11', 'and is watched from then on');
+});
+
+// The player on a live stream as seen 2026-11-09 (Lofi Girl): YouTube no
+// longer puts "ytp-live" on #movie_player, the video reports a finite
+// duration (50390 s) and plays near its end, and the player API says isLive.
+function livePlayerPage(videoData, options = {}) {
+    const video = h('video', { class: 'html5-main-video' });
+    Object.assign(video, { readyState: 4, playbackRate: 1, currentTime: 46790, duration: 50390 });
+    const handlers = {};
+    video.addEventListener = (type, fn) => { handlers[type] = fn; };
+    const timeDisplay = h('div', { class: options.liveSwitch ? 'ytp-time-display ytp-live' : 'ytp-time-display' });
+    const player = h('div', { id: 'movie_player', class: 'html5-video-player ytp-livebadge-color' },
+        video, timeDisplay);
+    player.rates = [];
+    player.setPlaybackRate = rate => { player.rates.push(rate); };
+    if (videoData) {
+        player.data = videoData;
+        player.getVideoData = () => player.data;
+    }
+    return { video, player, handlers, timeDisplay, dom: createDocument(player) };
+}
+
+test('the default speed leaves a live stream alone and waits for the player after navigation', () => {
+    const page = livePlayerPage({ video_id: 'liveStream1', isLive: true });
+    const api = loadContentHarness(new Set(), { dom: page.dom, player: page.player });
+    api.configure({ settings: { enabled: true, ytSpeedDefault: 1.5 } });
+    api.setPath('/watch?v=liveStream1');
+    api.applyDefaultSpeed();
+    assert.equal(page.video.playbackRate, 1, 'a live stream keeps its speed');
+    assert.deepEqual(page.player.rates, []);
+
+    // In-page navigation to a normal video: the URL changes first, and for
+    // about 150 ms the player still describes the live stream.
+    api.setPath('/watch?v=normalVid01');
+    api.applyDefaultSpeed();
+    assert.equal(page.video.playbackRate, 1, "the previous video's answer is not this video's");
+    page.player.data = { video_id: 'normalVid01', isLive: false };
+    page.video.duration = 7479;
+    api.applyDefaultSpeed();
+    assert.equal(page.video.playbackRate, 1.5, 'the default applies once the player is on the new video');
+    assert.deepEqual(page.player.rates, [1.5]);
+
+    // And back to a live stream: the stale "not live" answer is not trusted either.
+    api.setPath('/watch?v=liveStream2');
+    api.applyDefaultSpeed();
+    page.player.data = { video_id: 'liveStream2', isLive: true };
+    api.applyDefaultSpeed();
+    assert.deepEqual(page.player.rates, [1.5], 'the second live stream is left alone too');
+});
+
+test("a playback profile's speed skips a live stream", () => {
+    const page = livePlayerPage({ video_id: 'liveStream1', isLive: true });
+    const api = loadContentHarness(new Set(), { dom: page.dom, player: page.player });
+    api.configure({ settings: {
+        enabled: true, volumeBoost: 1,
+        blockShorts: false, hideSidebarSpinner: false, hideEndScreen: false
+    } });
+    api.setPath('/watch?v=liveStream1');
+    api.fire('ytb-apply-playback-profile', { site: 'youtube', speed: 1.75, volumeBoost: null });
+    assert.deepEqual(page.player.rates, [], 'the player rate is left alone');
+    assert.equal(page.video.playbackRate, 1);
+
+    page.player.data = { video_id: 'liveStream1', isLive: false };
+    api.fire('ytb-apply-playback-profile', { site: 'youtube', speed: 1.75, volumeBoost: null });
+    assert.deepEqual(page.player.rates, [1.75], 'a normal video still gets the profile speed');
+});
+
+test('a live stream playing near its live edge is not recorded as watched', () => {
+    const watched = new Set();
+    const page = livePlayerPage({ video_id: 'liveStream1', isLive: true });
+    const api = loadContentHarness(watched, { dom: page.dom, player: page.player });
+    api.configure({ settings: { enabled: true, hideWatched: true, watchedThreshold: 90 } });
+    api.setPath('/watch?v=liveStream1');
+    api.ensureWatchedHook(page.video);
+    page.handlers.timeupdate();
+    assert.equal(watched.has('liveStream1'), false, '93% of a live window is not a watched video');
+
+    api.setPath('/watch?v=normalVid01');
+    Object.assign(page.video, { currentTime: 95, duration: 100 });
+    page.handlers.timeupdate();
+    assert.equal(watched.has('normalVid01'), false, 'not while the player still describes the live stream');
+    page.player.data = { video_id: 'normalVid01', isLive: false };
+    page.handlers.timeupdate();
+    assert.equal(watched.has('normalVid01'), true, 'a normal video past the threshold is recorded');
+});
+
+test("without the player API the time display's live switch decides", () => {
+    const page = livePlayerPage(null, { liveSwitch: true });
+    const api = loadContentHarness(new Set(), { dom: page.dom, player: page.player });
+    api.configure({ settings: { enabled: true, ytSpeedDefault: 1.5 } });
+    api.setPath('/watch?v=liveStream1');
+
+    // A preroll ad clears the switch (seen live 2026-11-09): wait it out.
+    page.player.classList.add('ad-showing');
+    page.timeDisplay.classList.remove('ytp-live');
+    api.applyDefaultSpeed();
+    assert.equal(page.video.playbackRate, 1, 'no decision during the ad');
+    page.player.classList.remove('ad-showing');
+    page.timeDisplay.classList.add('ytp-live');
+    api.applyDefaultSpeed();
+    assert.equal(page.video.playbackRate, 1, 'the live switch keeps a live stream at its speed');
+
+    api.setPath('/watch?v=normalVid01');
+    page.timeDisplay.classList.remove('ytp-live');
+    api.applyDefaultSpeed();
+    assert.equal(page.video.playbackRate, 1.5);
+});
+
+test('Chromium asks the MAIN world whether the player is live, synchronously', () => {
+    // The isolated world's #movie_player has no API and (as on a live stream
+    // seen 2026-11-09) no "ytp-live" class; only the page world can ask it.
+    const page = livePlayerPage(null);
+    delete page.player.setPlaybackRate;
+    let pageData = { video_id: 'liveStream1', isLive: true };
+    const api = loadContentHarness(new Set(), { dom: page.dom, player: page.player });
+    attachPageWorld(api, { getVideoData: () => pageData });
+    api.configure({ settings: { enabled: true, ytSpeedDefault: 1.5 } });
+    api.setPath('/watch?v=liveStream1');
+    api.applyDefaultSpeed();
+    assert.equal(page.video.playbackRate, 1, 'a live stream keeps its speed');
+
+    api.setPath('/watch?v=normalVid01');
+    api.applyDefaultSpeed();
+    assert.equal(page.video.playbackRate, 1, 'the player is still on the live stream');
+    pageData = { video_id: 'normalVid01', isLive: false };
+    api.applyDefaultSpeed();
+    assert.equal(page.video.playbackRate, 1.5);
+    assert.deepEqual(api.postedMessages.map(item => item.message.type), ['ytb-set-rate'],
+        'the live check itself posts no messages');
 });

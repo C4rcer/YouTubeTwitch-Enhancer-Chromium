@@ -232,7 +232,10 @@ function buildHarness(data) {
 
     const listenerOwners = type => owners.filter(item => item.type === type).map(item => item.owner);
 
-    return { video, videoTarget, player, document, fire, changeData, listenerOwners, on: document.addEventListener };
+    return {
+        video, videoTarget, player, document, fire, changeData, listenerOwners,
+        on: document.addEventListener, location: context.location
+    };
 }
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 10));
@@ -388,4 +391,84 @@ test('a wheel listener exists only for configured wheel shortcuts, on the player
     }));
     await settle();
     assert.equal(bound.listenerOwners('wheel').length, 0, 'removing the shortcut removes the listener');
+});
+
+// The live player as seen 2026-11-09: no "ytp-live" class on #movie_player,
+// only the player API's isLive flag, which names the video it describes.
+const studyProfile = {
+    settings: { enabled: true },
+    playbackProfiles: [{ id: 'study', name: 'Study', sites: ['youtube'], speed: 1.5 }],
+    activePlaybackProfiles: { youtube: 'study', twitch: 'default' }
+};
+
+test('a YouTube profile leaves a live stream at its own speed, like Twitch', async () => {
+    const harness = buildHarness(studyProfile);
+    let answers = [{ video_id: 'abc123', isLive: true }];
+    harness.player.getVideoData = () => answers.length > 1 ? answers.shift() : answers[0];
+    const applied = [];
+    harness.on('ytb-apply-playback-profile', event => applied.push(event.detail));
+    await settle();
+    assert.equal(harness.video.playbackRate, 1, 'a live stream keeps its speed');
+    assert.equal(applied.length, 1, 'the rest of the profile still applies');
+
+    // In-page navigation to a normal video: the URL moves first, and the
+    // player describes the live stream for two more passes.
+    harness.location.search = '?v=next456';
+    harness.location.href = 'https://www.youtube.com/watch?v=next456';
+    harness.video.currentSrc = 'https://media.example/next';
+    answers = [
+        { video_id: 'abc123', isLive: true },
+        { video_id: 'abc123', isLive: true },
+        { video_id: 'next456', isLive: false }
+    ];
+    harness.fire('loadedmetadata', {});
+    for (let i = 0; i < 100 && applied.length < 2; i++) await settle();
+    assert.equal(answers.length, 1, 'it asked again until the player was on the new video');
+    assert.equal(harness.video.playbackRate, 1.5, 'the normal video gets the profile speed');
+    assert.equal(applied.length, 2, 'once');
+});
+
+test('a YouTube profile leaves the speed alone if the player never reaches the video', async () => {
+    const harness = buildHarness(studyProfile);
+    harness.player.getVideoData = () => ({ video_id: 'previous1', isLive: false });
+    const applied = [];
+    harness.on('ytb-apply-playback-profile', event => applied.push(event.detail));
+    for (let i = 0; i < 100 && !applied.length; i++) await settle();
+    assert.equal(applied.length, 1, 'the profile applies after the wait');
+    assert.equal(harness.video.playbackRate, 1, 'without its speed, which could be a live stream');
+});
+
+test('without the player API a YouTube profile reads the live switch', async () => {
+    const harness = buildHarness(studyProfile);
+    const liveSwitch = { className: 'ytp-time-display ytp-live' };
+    harness.player.querySelector = selector =>
+        selector === '.ytp-time-display.ytp-live' ? liveSwitch : null;
+    await settle();
+    assert.equal(harness.video.playbackRate, 1);
+});
+
+test('Chromium profiles ask the MAIN world whether YouTube is live', async () => {
+    const harness = buildHarness(studyProfile);
+    // The isolated world's player has no API; page-quality.js answers a
+    // ytb-live-query event with a ytb-live-data event before dispatch returns.
+    let pageData = { video_id: 'abc123', isLive: true };
+    let queries = 0;
+    harness.on('ytb-live-query', () => {
+        queries++;
+        harness.document.dispatchEvent({
+            type: 'ytb-live-data',
+            detail: JSON.stringify({ videoId: pageData.video_id, isLive: pageData.isLive })
+        });
+    });
+    const applied = [];
+    harness.on('ytb-apply-playback-profile', event => applied.push(event.detail));
+    await settle();
+    assert.equal(queries, 1);
+    assert.equal(harness.video.playbackRate, 1, 'a live stream keeps its speed');
+    assert.equal(applied.length, 1);
+
+    pageData = { video_id: 'abc123', isLive: false };
+    harness.fire('loadedmetadata', {});
+    for (let i = 0; i < 100 && applied.length < 2; i++) await settle();
+    assert.equal(harness.video.playbackRate, 1.5, 'a normal video gets the profile speed');
 });

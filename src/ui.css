@@ -197,6 +197,33 @@ label.toggle .t-text small { color: var(--muted); font-size: 12px; }
     .kofi .heart { animation: none; }
 }
 
+/* The store rating link sits beside .kofi as a quieter outline pill. */
+.support-links {
+    display: inline-flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+}
+.rate {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 7px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.rate:hover {
+    background: var(--hover);
+    border-color: var(--accent);
+    text-decoration: none;
+}
+.rate .star { color: #f5b301; }
+
 .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .status { font-size: 12px; color: var(--ok); min-height: 16px; margin-top: 8px; }
 .status.err { color: var(--accent); }

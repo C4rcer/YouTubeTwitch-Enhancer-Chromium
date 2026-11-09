@@ -26,10 +26,33 @@
  *                              selection player-controls.js performs directly
  *                              on Firefox.
  *
+ * One request is a DOM event on document instead of a message, because
+ * its callers need the answer synchronously:
+ *   ytb-live-query             answered with a ytb-live-data event whose
+ *                              detail is a JSON string { videoId, isLive }
+ *                              from the player's getVideoData(), dispatched
+ *                              inside the query's dispatchEvent() call. No
+ *                              answer when the player API is unavailable.
+ *
  * Runs in the page world: no extension APIs, no storage access.
  * ================================================================== */
 (function () {
     'use strict';
+
+    // YouTube stopped marking #movie_player with "ytp-live" in 2026, so the
+    // speed suite and playback profiles ask the player whether it is live.
+    document.addEventListener('ytb-live-query', () => {
+        const player = document.getElementById('movie_player');
+        let reply = '';
+        try {
+            const data = player && typeof player.getVideoData === 'function'
+                ? player.getVideoData() : null;
+            if (data && typeof data.isLive === 'boolean') {
+                reply = JSON.stringify({ videoId: String(data.video_id || ''), isLive: data.isLive });
+            }
+        } catch (err) { /* no answer: the content scripts use the DOM signal */ }
+        if (reply) document.dispatchEvent(new CustomEvent('ytb-live-data', { detail: reply }));
+    });
 
     // ytb-max-quality state for the video in the URL.
     const QUALITY_SETTLE_MS = 5000;
