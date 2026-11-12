@@ -6,7 +6,9 @@ shipped from this repo as "4.8.0" and "4.8.1"; they correspond to
 Firefox 4.7.1 and 4.7.2 and have been renumbered to match (nothing was
 ever published to the Chrome Web Store under the old numbers).
 
-## Unreleased
+## 4.8.13 - 2026-11-12
+
+Brings this repo to the Firefox 4.8.13 feature set (Firefox 4.8.12 and 4.8.13); the Firefox CHANGELOG has the full story behind each fix.
 
 ### Added
 
