@@ -3293,15 +3293,45 @@
     // sizing variants of the action bar around, so patch every match in the
     // metadata area (hidden ones are harmless, whichever shows carries it).
     function dislikeButtons() {
-        // Everything scoped to ytd-watch-metadata: the same view-models and
-        // the legacy #dislike-button id are ALSO used by comment toolbars
-        // (verified live 2026-07 — an unscoped selector stamped the video's
-        // count onto every comment).
+        // Everything scoped to the video's own action bar: the same
+        // view-models and the legacy #dislike-button id are ALSO used by
+        // comment toolbars (verified live 2026-07 — an unscoped selector
+        // stamped the video's count onto every comment). Desktop's bar is in
+        // ytd-watch-metadata; m.youtube.com (Firefox for Android) has none of
+        // that and puts its buttons in ytm-slim-video-action-bar-renderer
+        // (verified live 2026-11 with a Firefox-for-Android user agent).
         return [...document.querySelectorAll(
             'ytd-watch-metadata dislike-button-view-model button, ' +
             'ytd-watch-metadata #segmented-dislike-button button, ' +
-            'ytd-watch-metadata ytd-toggle-button-renderer#dislike-button button'
+            'ytd-watch-metadata ytd-toggle-button-renderer#dislike-button button, ' +
+            'ytm-slim-video-action-bar-renderer dislike-button-view-model button'
         )];
+    }
+
+    // A button's own text label: the classic class, or the camelCase one
+    // m.youtube.com uses (verified live 2026-11 on its Subscribe button).
+    const BUTTON_TEXT = '.yt-spec-button-shape-next__button-text-content, ' +
+        '.ytSpecButtonShapeNextButtonTextContent';
+
+    // m.youtube.com's like button is icon-only too, so on the phone neither
+    // count showed (verified live 2026-11). Desktop prints YouTube's count as
+    // button text, so only like buttons without a text label get one.
+    function likeButtons() {
+        return [...document.querySelectorAll(
+            'ytm-slim-video-action-bar-renderer like-button-view-model button'
+        )].filter(b => !b.querySelector(BUTTON_TEXT));
+    }
+
+    // The like button's label carries YouTube's exact count ("like this
+    // video along with 19,508,248 other people"), and it reads the same
+    // pressed or not (verified live 2026-11 in the page's own button data),
+    // so it gets no local +1. Read it the way the official RYD extension
+    // does, but only when the label holds exactly one whole number in
+    // thousands groups: anything else falls back to RYD's like count.
+    function labelLikeCount(label) {
+        const runs = String(label || '').match(/\d{1,3}(?:[.,'’\s]\d{3})+|\d+/g);
+        if (!runs || runs.length !== 1) return null;
+        return Number(runs[0].replace(/\D/g, ''));
     }
 
     // RYD's count can never include your own dislike: this add-on only reads
@@ -3321,15 +3351,18 @@
             });
         }
         rydObserved.add(b);
-        rydPressObserver.observe(b, { attributes: true, attributeFilter: ['aria-pressed'] });
+        rydPressObserver.observe(b, { attributes: true, attributeFilter: ['aria-pressed', 'aria-label'] });
     }
 
-    function applyRydTo(b, vid, res) {
+    function applyRydTo(b, vid, res, kind) {
+        const base = kind === 'like' ? res.likes : res.dislikes;
         b.dataset.ytbRyd = vid;
-        b.dataset.ytbRydBase = String(res.dislikes);
+        if (kind === 'like') b.dataset.ytbRydKind = 'like';
+        if (typeof base === 'number' && Number.isFinite(base)) b.dataset.ytbRydBase = String(base);
+        else delete b.dataset.ytbRydBase;
         renderRydCount(b);
         watchRydPress(b);
-        if (b.querySelector('.yt-spec-button-shape-next__button-text-content')) return;
+        if (b.querySelector(BUTTON_TEXT)) return;
         // Icon-only button: widen it for the appended count. YouTube pins the
         // button AND its view-model wrappers to a fixed width with
         // higher-specificity !important rules, so inline styles it is
@@ -3345,12 +3378,21 @@
         if (!stop) b.style.setProperty('width', 'auto', 'important');
     }
 
+    function rydCountOf(b) {
+        const base = b.dataset.ytbRydBase == null ? NaN : Number(b.dataset.ytbRydBase);
+        if (b.dataset.ytbRydKind === 'like') {
+            const own = labelLikeCount(b.getAttribute('aria-label'));
+            return own != null ? own : base;
+        }
+        return base + (b.getAttribute('aria-pressed') === 'true' ? 1 : 0);
+    }
+
     function renderRydCount(b) {
-        const base = Number(b.dataset.ytbRydBase);
-        if (!b.dataset.ytbRyd || !Number.isFinite(base)) return;
-        const count = base + (b.getAttribute('aria-pressed') === 'true' ? 1 : 0);
+        if (!b.dataset.ytbRyd) return;
+        const count = rydCountOf(b);
+        if (!Number.isFinite(count)) return;
         const label = formatCount(count);
-        let target = b.querySelector('.yt-spec-button-shape-next__button-text-content');
+        let target = b.querySelector(BUTTON_TEXT);
         if (!target) {
             // Icon-only button: the count goes in a span of our own.
             target = b.querySelector('.ytb-ryd-count');
@@ -3361,7 +3403,9 @@
             }
         }
         if (target.textContent !== label) target.textContent = label;
-        const title = count.toLocaleString() + ' dislikes — Return YouTube Dislike';
+        const title = b.dataset.ytbRydKind === 'like'
+            ? count.toLocaleString() + ' likes'
+            : count.toLocaleString() + ' dislikes — Return YouTube Dislike';
         if (b.title !== title) b.title = title;
     }
 
@@ -3370,7 +3414,7 @@
         if (!settings.rydEnabled || location.pathname !== '/watch') return;
         const vid = watchVideoId();
         if (!vid || rydPendingVid === vid) return;
-        const btns = dislikeButtons();
+        const btns = dislikeButtons().concat(likeButtons());
         // Buttons already showing this video's count (possibly written by an
         // earlier add-on instance) still need watching for your own vote.
         btns.filter(b => b.dataset.ytbRyd === vid).forEach(b => {
@@ -3383,6 +3427,7 @@
             rydPendingVid = null;
             if (!res || res.dislikes == null || watchVideoId() !== vid) return;
             dislikeButtons().forEach(b => applyRydTo(b, vid, res));
+            likeButtons().forEach(b => applyRydTo(b, vid, res, 'like'));
         }).catch(() => { rydPendingVid = null; });
     }
 

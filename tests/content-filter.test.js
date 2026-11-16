@@ -259,7 +259,7 @@ function loadContentHarness(watched, options = {}) {
         .forEach(observer => observer.callback([{ type: 'attributes', target, attributeName }]));
     const context = {
         browser: {
-            runtime: { onMessage: noopListener },
+            runtime: { onMessage: noopListener, sendMessage: options.sendMessage },
             storage: { onChanged: noopListener, local }
         },
         document,
@@ -1668,6 +1668,81 @@ test('a count written before a reload still follows your vote', () => {
     button.setAttribute('aria-pressed', 'false');
     api.mutate(button, 'aria-pressed');
     assert.equal(button.querySelector('.ytb-ryd-count').textContent, '11', 'and is watched from then on');
+});
+
+// m.youtube.com's watch page as served to Firefox for Android, live
+// 2026-11-16: no ytd-watch-metadata, and icon-only like/dislike buttons in
+// the slim action bar. The like count is only in the button's label.
+function mobileActionBar(likeLabel, options = {}) {
+    const like = h('button', { 'aria-pressed': options.liked ? 'true' : 'false', 'aria-label': likeLabel });
+    const dislike = h('button', { 'aria-pressed': 'false', 'aria-label': 'Dislike this video' });
+    const commentDislike = h('button', { 'aria-pressed': 'false', 'aria-label': 'Dislike this comment' });
+    const dom = createDocument(
+        h('ytm-slim-video-action-bar-renderer', {},
+            h('div', { class: 'slim-video-action-bar-actions simplified' },
+                h('like-button-view-model', {}, h('toggle-button-view-model', {}, like)),
+                h('dislike-button-view-model', {}, h('toggle-button-view-model', {}, dislike)))),
+        h('ytm-comment-renderer', {},
+            h('dislike-button-view-model', {}, commentDislike)));
+    return { dom, like, dislike, commentDislike };
+}
+
+async function settleRyd(api) {
+    api.processRyd();
+    for (let i = 0; i < 5; i++) await null;
+}
+
+test('Return YouTube Dislike fills both counts on m.youtube.com', async () => {
+    const page = mobileActionBar('like this video along with 3,081 other people');
+    const asked = [];
+    const api = loadContentHarness(new Set(), {
+        dom: page.dom,
+        sendMessage: async msg => { asked.push(msg); return { likes: 3001, dislikes: 226 }; }
+    });
+    api.configure({ settings: { enabled: true, rydEnabled: true } });
+    api.setPath('/watch?v=mobileVid01');
+    await settleRyd(api);
+
+    assert.equal(JSON.stringify(asked), JSON.stringify([{ action: 'ytb-ryd-votes', videoId: 'mobileVid01' }]));
+    assert.equal(page.dislike.querySelector('.ytb-ryd-count').textContent, '226');
+    // YouTube's own count from the label wins over RYD's older copy.
+    assert.equal(page.like.querySelector('.ytb-ryd-count').textContent, '3.1K');
+    assert.equal(page.like.getAttribute('title'), (3081).toLocaleString() + ' likes');
+    assert.equal(page.commentDislike.querySelector('.ytb-ryd-count'), null,
+        "a comment's dislike button never gets the video's count");
+
+    // The label reads the same pressed or not, so liking adds nothing.
+    page.like.setAttribute('aria-pressed', 'true');
+    api.mutate(page.like, 'aria-pressed');
+    assert.equal(page.like.getAttribute('title'), (3081).toLocaleString() + ' likes');
+});
+
+test("a like label without one plain number falls back to RYD's like count", async () => {
+    for (const label of ['I like this', 'like this video along with 1,2 M other people']) {
+        const page = mobileActionBar(label);
+        const api = loadContentHarness(new Set(), {
+            dom: page.dom,
+            sendMessage: async () => ({ likes: 11234, dislikes: 128 })
+        });
+        api.configure({ settings: { enabled: true, rydEnabled: true } });
+        api.setPath('/watch?v=mobileVid02');
+        await settleRyd(api);
+        assert.equal(page.like.querySelector('.ytb-ryd-count').textContent, '11.2K', label);
+        assert.equal(page.dislike.querySelector('.ytb-ryd-count').textContent, '128', label);
+    }
+});
+
+test('a mobile like button with neither count is left without one', async () => {
+    const page = mobileActionBar('I like this');
+    const api = loadContentHarness(new Set(), {
+        dom: page.dom,
+        sendMessage: async () => ({ dislikes: 5 })
+    });
+    api.configure({ settings: { enabled: true, rydEnabled: true } });
+    api.setPath('/watch?v=mobileVid03');
+    await settleRyd(api);
+    assert.equal(page.like.querySelector('.ytb-ryd-count'), null);
+    assert.equal(page.dislike.querySelector('.ytb-ryd-count').textContent, '5');
 });
 
 // The player on a live stream as seen 2026-11-09 (Lofi Girl): YouTube no

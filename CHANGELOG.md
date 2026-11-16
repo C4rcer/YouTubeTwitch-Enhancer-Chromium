@@ -6,6 +6,18 @@ shipped from this repo as "4.8.0" and "4.8.1"; they correspond to
 Firefox 4.7.1 and 4.7.2 and have been renumbered to match (nothing was
 ever published to the Chrome Web Store under the old numbers).
 
+## 4.8.14 - 2026-11-16
+
+Brings this repo to the Firefox 4.8.14 feature set; the Firefox CHANGELOG has the full story.
+
+### Fixed
+
+- Return YouTube Dislike showed no counts on m.youtube.com, the site mobile browsers get. The add-on only looked inside desktop's `ytd-watch-metadata`. With RYD on, m.youtube.com's icon-only dislike button now gets RYD's count, and its like button gets YouTube's own count from the button's label, falling back to RYD's. Desktop is unchanged. Same code as Firefox 4.8.14.
+
+### Validation
+
+- The Firefox change and its three regressions came across unchanged (the RYD code was identical in both repos), and the content-filter harness gained the same `sendMessage` option. Full suite passes 147/147. Checked live only in Firefox, with a Firefox for Android user agent on m.youtube.com; not run in a Chromium browser.
+
 ## 4.8.13 - 2026-11-12
 
 Brings this repo to the Firefox 4.8.13 feature set (Firefox 4.8.12 and 4.8.13); the Firefox CHANGELOG has the full story behind each fix.
