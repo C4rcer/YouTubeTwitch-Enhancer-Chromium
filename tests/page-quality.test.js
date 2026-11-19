@@ -92,3 +92,32 @@ test('the MAIN-world helper answers a live query before dispatchEvent returns', 
     assert.equal(ask(), null);
     assert.equal(page.posted.length, 0, 'no window messages are involved');
 });
+
+test('the MAIN-world helper reads and sets the player volume before dispatchEvent returns', () => {
+    // Live 2026-11 on NU75uz0b8EU: the slider says 100 while loudness
+    // normalization holds the element at 0.497.
+    let volume = 100, muted = true;
+    const player = {
+        getVolume: () => volume,
+        setVolume(value) { volume = value; },
+        isMuted: () => muted,
+        unMute() { muted = false; }
+    };
+    const page = loadPageQuality(player);
+    const ask = (type, detail) => {
+        let reply = null;
+        const onReply = event => { reply = event.detail; };
+        page.document.addEventListener('ytb-volume-data', onReply);
+        page.document.dispatchEvent(new page.CustomEvent(type, { detail }));
+        page.document.removeEventListener('ytb-volume-data', onReply);
+        return reply;
+    };
+    assert.deepEqual(JSON.parse(ask('ytb-volume-query')), { volume: 100 });
+    assert.deepEqual(JSON.parse(ask('ytb-volume-set', '95')), { volume: 95 });
+    assert.equal(muted, false, 'a level above 0 unmutes');
+    assert.equal(ask('ytb-volume-set', '150'), null, 'out of range: untouched, no answer');
+    assert.equal(ask('ytb-volume-set', 95), null, 'only a string crosses worlds');
+    assert.equal(volume, 95);
+    delete player.getVolume;
+    assert.equal(ask('ytb-volume-query'), null, 'no API: content.js falls back to the DOM');
+});

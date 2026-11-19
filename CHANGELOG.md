@@ -6,6 +6,19 @@ shipped from this repo as "4.8.0" and "4.8.1"; they correspond to
 Firefox 4.7.1 and 4.7.2 and have been renumbered to match (nothing was
 ever published to the Chrome Web Store under the old numbers).
 
+## 4.8.15 - 2026-11-19
+
+Brings this repo to the Firefox 4.8.15 feature set; the Firefox CHANGELOG has the full story.
+
+### Fixed
+
+- The volume boost slider never appeared on loud videos. YouTube's loudness normalization plays a loud master below full volume with its slider at 100%, and the slider's check read the element's volume. On those videos the boost also forced the element to full volume, so 105% came out about 2.1 times as loud as 100%. The boost slider, scroll-for-volume, playback profiles and the volume shortcuts now read and set YouTube's own volume, and the boost multiplies YouTube's normalized level. Same fix as Firefox 4.8.15. Here the isolated world reaches the player through two new synchronous requests to `page-quality.js`, `ytb-volume-query` and `ytb-volume-set`. They fall back to the slider's `aria-valuenow`, then the element.
+
+### Validation
+
+- Checked end to end on 2026-11-19 in a throwaway headless Chrome 153 profile with the unpacked extension, loaded through CDP `Extensions.loadUnpacked`. On NU75uz0b8EU (+6.08 dB, element 0.497 at YouTube's 100%), the slider showed at 100%. One scroll up gave a 105% boost with the element still at 0.497, so the set request crossed into the MAIN world rather than falling back to the element. Two scrolls down set YouTube's volume to 95 (element 0.472) and hid the slider.
+- The Firefox 4.8.15 regressions came across, plus a Chromium one for each side of the bridge: the MAIN-world helper in `tests/page-quality.test.js`, and the isolated world in the content-filter test, against the real `page-quality.js`, and in the player-controls test. The content-filter harness's `CustomEvent` now keeps `detail`. Full suite passes 153/153.
+
 ## 4.8.14 - 2026-11-16
 
 Brings this repo to the Firefox 4.8.14 feature set; the Firefox CHANGELOG has the full story.

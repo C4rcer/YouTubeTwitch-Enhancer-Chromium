@@ -26,13 +26,21 @@
  *                              selection player-controls.js performs directly
  *                              on Firefox.
  *
- * One request is a DOM event on document instead of a message, because
- * its callers need the answer synchronously:
+ * Some requests are DOM events on document instead of messages, because
+ * their callers need the answer synchronously:
  *   ytb-live-query             answered with a ytb-live-data event whose
  *                              detail is a JSON string { videoId, isLive }
  *                              from the player's getVideoData(), dispatched
  *                              inside the query's dispatchEvent() call. No
  *                              answer when the player API is unavailable.
+ *   ytb-volume-query           answered the same way with a ytb-volume-data
+ *                              event, detail a JSON string { volume }: the
+ *                              player's own 0-100 volume (its slider), which
+ *                              loudness normalization keeps apart from the
+ *                              element's.
+ *   ytb-volume-set (detail "0".."100")
+ *                              setVolume, unMute above 0, then answered like
+ *                              a query.
  *
  * Runs in the page world: no extension APIs, no storage access.
  * ================================================================== */
@@ -52,6 +60,41 @@
             }
         } catch (err) { /* no answer: the content scripts use the DOM signal */ }
         if (reply) document.dispatchEvent(new CustomEvent('ytb-live-data', { detail: reply }));
+    });
+
+    // A loud master plays below 1.0 with the slider at 100% (verified live
+    // 2026-11 on NU75uz0b8EU: element 0.497), so the volume boost and the
+    // volume shortcuts work from the player's number, not the element's.
+    function answerVolume(player) {
+        let reply = '';
+        try {
+            const volume = Number(player.getVolume());
+            if (Number.isFinite(volume)) reply = JSON.stringify({ volume });
+        } catch (err) { /* no answer: the content scripts use the DOM */ }
+        if (reply) document.dispatchEvent(new CustomEvent('ytb-volume-data', { detail: reply }));
+    }
+
+    function volumePlayer() {
+        const player = document.getElementById('movie_player');
+        return player && typeof player.getVolume === 'function' &&
+            typeof player.setVolume === 'function' ? player : null;
+    }
+
+    document.addEventListener('ytb-volume-query', () => {
+        const player = volumePlayer();
+        if (player) answerVolume(player);
+    });
+
+    document.addEventListener('ytb-volume-set', (e) => {
+        const level = typeof e.detail === 'string' ? Number(e.detail) : NaN;
+        const player = volumePlayer();
+        if (!player || !(level >= 0 && level <= 100)) return;
+        try {
+            player.setVolume(Math.round(level));
+            if (level > 0 && typeof player.isMuted === 'function' && player.isMuted() &&
+                typeof player.unMute === 'function') player.unMute();
+        } catch (err) { return; }
+        answerVolume(player);
     });
 
     // ytb-max-quality state for the video in the URL.

@@ -4224,16 +4224,14 @@
         if (!v) return;
         e.preventDefault();
         e.stopPropagation();
-        const cur = Math.round((settings.volumeBoost > 1) ? settings.volumeBoost * 100 : (v.muted ? 0 : v.volume) * 100);
+        const cur = Math.round((settings.volumeBoost > 1) ? settings.volumeBoost * 100 : (v.muted ? 0 : nativeVolume(v)));
         let next = cur + (e.deltaY < 0 ? 5 : -5);
         next = Math.min(500, Math.max(0, Math.round(next)));
         if (next <= 100) {
-            if (v.muted) v.muted = false;
-            v.volume = next / 100;
+            setNativeVolume(v, next);
             setVolumeBoost(1);
         } else {
-            if (v.muted) v.muted = false;
-            v.volume = 1;
+            setNativeVolume(v, 100);
             setVolumeBoost(next / 100);
         }
         showVolumeOverlay('🔊 ' + next + '%');
@@ -4248,8 +4246,78 @@
         return document.querySelector('video.html5-main-video') || document.querySelector('video');
     }
 
+    // YouTube's own volume, 0-100 as its slider shows it. It is not the
+    // element's volume: loudness normalization plays a loud master quieter
+    // while the slider still reads 100% (verified live 2026-11 on
+    // NU75uz0b8EU: loudnessDb 6.08, stats for nerds "100%/50%", element
+    // volume 0.497 after setVolume(100)). The boost multiplies on top of
+    // that normalized level, so its slider and the wheel follow YouTube's
+    // number. The slider's ARIA value, then the element, stand in when the
+    // player API is out of reach.
+    function playerVolumeApi() {
+        const p = document.getElementById('movie_player');
+        const pApi = p && (p.wrappedJSObject || p);
+        return pApi && typeof pApi.getVolume === 'function' &&
+            typeof pApi.setVolume === 'function' ? pApi : null;
+    }
+
+    // Chromium's isolated world can't call the player API. page-quality.js
+    // answers ytb-volume-query, and ytb-volume-set once it has set the level,
+    // with a ytb-volume-data event (a JSON string { volume }) dispatched
+    // inside the request's dispatchEvent() call. Null without an answer.
+    function pageVolume(setTo) {
+        let reply = '';
+        const onReply = e => { if (typeof e.detail === 'string') reply = e.detail; };
+        document.addEventListener('ytb-volume-data', onReply);
+        try {
+            document.dispatchEvent(setTo == null
+                ? new CustomEvent('ytb-volume-query')
+                : new CustomEvent('ytb-volume-set', { detail: String(setTo) }));
+        } catch (e) { /* no answer */ }
+        document.removeEventListener('ytb-volume-data', onReply);
+        try {
+            const data = reply ? JSON.parse(reply) : null;
+            const volume = data ? Number(data.volume) : NaN;
+            return Number.isFinite(volume) ? volume : null;
+        } catch (e) { return null; }
+    }
+
+    function nativeVolume(v) {
+        let vol = null;
+        try {
+            const pApi = playerVolumeApi();
+            vol = pApi ? Number(pApi.getVolume()) : pageVolume();
+        } catch (e) { /* use the DOM */ }
+        if (typeof vol === 'number' && Number.isFinite(vol)) return Math.min(100, Math.max(0, Math.round(vol)));
+        const panel = document.querySelector('#movie_player .ytp-volume-panel[aria-valuenow]');
+        const aria = panel ? Number(panel.getAttribute('aria-valuenow')) : NaN;
+        if (Number.isFinite(aria)) return Math.min(100, Math.max(0, Math.round(aria)));
+        return v ? Math.round(v.volume * 100) : 0;
+    }
+
+    // Set YouTube's own volume, so its slider, its saved preference and its
+    // loudness normalization all follow. Unmutes for anything above 0.
+    function setNativeVolume(v, pct) {
+        pct = Math.min(100, Math.max(0, Math.round(pct)));
+        let viaApi = false;
+        try {
+            const pApi = playerVolumeApi();
+            if (pApi) {
+                pApi.setVolume(pct);
+                if (pct > 0 && typeof pApi.isMuted === 'function' && pApi.isMuted() &&
+                    typeof pApi.unMute === 'function') pApi.unMute();
+                viaApi = true;
+            } else {
+                viaApi = pageVolume(pct) != null;
+            }
+        } catch (e) { /* write the element below */ }
+        if (!v) return;
+        if (!viaApi) v.volume = pct / 100;
+        if (pct > 0 && v.muted) v.muted = false;
+    }
+
     function nativeAtMax(v) {
-        return !!v && !v.muted && v.volume >= 0.999;
+        return !!v && !v.muted && nativeVolume(v) >= 100;
     }
 
     function updateBoostUI() {
@@ -4258,8 +4326,8 @@
         if (!wrap || wrap.dataset.ytbOwner !== INSTANCE_ID) return;
         const v = playerVideo();
         const boosting = (settings.volumeBoost || 1) > 1;
-        // While a boost is active the element is pinned to 100% and the gain
-        // rides on top. Native volume can still fall below 100% two ways:
+        // While a boost is active YouTube's slider is pinned to 100% and the
+        // gain rides on top. Native volume can still fall below 100% two ways:
         //   - the user deliberately drags YouTube's own slider down (or hits the
         //     volume keys) -> honour it and switch the boost off, matching the
         //     "pull the slider back below 100% to reset" behaviour; or
@@ -4267,11 +4335,12 @@
         //     (it fires when the volume panel wakes up as the controls fade in
         //     on hover) that must NOT wipe the user's boost.
         // A mute is neither: keep the boost and let it return on unmute.
-        if (v && boosting && !v.muted && v.volume < 0.999) {
+        // Loudness normalization lowering the element alone is not a drop.
+        if (v && boosting && !v.muted && nativeVolume(v) < 100) {
             const userDriven = nativeVolPointerDown ||
                                (Date.now() - lastNativeVolGesture < 1500);
             if (userDriven) setVolumeBoost(1);   // deliberate: turn boost off
-            else v.volume = 1;                    // spurious: re-pin, keep boosting
+            else setNativeVolume(v, 100);         // spurious: re-pin, keep boosting
         }
         const atMax = nativeAtMax(playerVideo());
         wrap.classList.toggle('ytb-hide', !atMax);
@@ -4316,8 +4385,7 @@
             input.addEventListener('input', (e) => {
                 e.stopPropagation();
                 const pct = parseInt(input.value, 10) || 100;
-                const v = playerVideo();
-                if (v) { if (v.muted) v.muted = false; v.volume = 1; }
+                setNativeVolume(playerVideo(), 100);
                 setVolumeBoost(pct / 100);
                 updateBoostUI();
                 showVolumeOverlay('🔊 ' + pct + '%');
@@ -4365,7 +4433,7 @@
         profileVolumeBoost = profileBoost == null ? null : settings.volumeBoost;
         const video = playerVideo();
         if (video && settings.volumeBoost > 1) {
-            video.volume = 1;
+            setNativeVolume(video, 100);
             ensureBoostGraph();
         }
         applyVolumeBoost();
